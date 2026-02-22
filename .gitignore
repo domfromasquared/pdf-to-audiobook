@@ -14,7 +14,87 @@
 /coverage
 
 # next.js
-/.next/
+/.next/# ------------------------------------------------------------
+# Dependencies
+# ------------------------------------------------------------
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# ------------------------------------------------------------
+# Next.js / build outputs
+# ------------------------------------------------------------
+.next/
+out/
+build/
+dist/
+.turbo/
+.vercel/
+
+# ------------------------------------------------------------
+# Logs
+# ------------------------------------------------------------
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ------------------------------------------------------------
+# Testing / coverage
+# ------------------------------------------------------------
+coverage/
+*.lcov
+
+# ------------------------------------------------------------
+# OS / editor junk
+# ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# ------------------------------------------------------------
+# Env / secrets (DO NOT COMMIT)
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+.env*.local
+
+# Service account / keys (common filenames)
+*.pem
+*.p12
+*.key
+*service-account*.json
+*google-credentials*.json
+*credentials*.json
+client-facing-*.json
+
+# ------------------------------------------------------------
+# Temporary files
+# ------------------------------------------------------------
+tmp/
+temp/
+*.tmp
+
+# ------------------------------------------------------------
+# TypeScript
+# ------------------------------------------------------------
+*.tsbuildinfo
+next-env.d.ts
+
+# ------------------------------------------------------------
+# Optional: local exports (if you ever add)
+# ------------------------------------------------------------
+*.zip
 /out/
 
 # production
@@ -39,3 +119,4 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.env*.local

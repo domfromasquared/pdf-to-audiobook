@@ -1,0 +1,337 @@
+import { NextResponse } from "next/server";
+import { put } from "@vercel/blob";
+import textToSpeech from "@google-cloud/text-to-speech";
+import { writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { execFile } from "child_process";
+
+export const runtime = "nodejs";
+
+// Chirp 3: HD voice map (friendly key -> real Google voice name)
+const CHIRP_HD_VOICES: Record<string, { languageCode: string; voiceName: string }> = {
+  Iapetus: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Iapetus" },
+  Enceladus: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Enceladus" },
+  Orus: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Orus" },
+  Leda: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Leda" },
+  Callirrhoe: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Callirrhoe" },
+};
+
+function getGoogleClient() {
+  const b64 = process.env.GOOGLE_TTS_KEY_B64;
+  if (!b64) throw new Error("Missing GOOGLE_TTS_KEY_B64");
+  const json = Buffer.from(b64, "base64").toString("utf8");
+  const credentials = JSON.parse(json);
+  return new textToSpeech.TextToSpeechClient({ credentials });
+}
+
+function stripLikelyHeaderFooterLines(lines: string[]) {
+  const counts = new Map<string, number>();
+  for (const ln of lines) {
+    const s = ln.trim();
+    if (!s) continue;
+    counts.set(s, (counts.get(s) || 0) + 1);
+  }
+
+  const threshold = Math.max(3, Math.floor(lines.length * 0.2));
+  const bad = new Set<string>();
+  for (const [k, v] of counts.entries()) {
+    if (k.length >= 12 && v >= threshold) bad.add(k);
+  }
+
+  return lines.filter((ln) => !bad.has(ln.trim()));
+}
+
+/**
+ * (2) List reading normalization: bullet lines become spoken "Item: ..."
+ * (3) Structure smoother: expands common abbreviations + cleans punctuation
+ */
+function audiobookPolish(t: string) {
+  return (t || "")
+    // expand common abbreviations for spoken flow
+    .replace(/\be\.g\.\b/gi, "for example")
+    .replace(/\bi\.e\.\b/gi, "that is")
+    .replace(/\bvs\.\b/gi, "versus")
+    .replace(/\bw\/\b/gi, "with")
+    .replace(/\betc\.\b/gi, "etcetera")
+    // reduce double punctuation
+    .replace(/([!?])\1+/g, "$1")
+    // normalize spaces
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function cleanTextForAudio(raw: string) {
+  let t = raw || "";
+  t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  let lines = t.split("\n").map((l) => l.trim());
+
+  // remove empty lines and obvious page labels
+  lines = lines.filter((l) => l && !/^\d+$/.test(l) && !/^page\s+\d+$/i.test(l));
+
+  // remove repeated headers/footers
+  lines = stripLikelyHeaderFooterLines(lines);
+
+  t = lines.join("\n");
+
+  // fix hyphenated line breaks: "exam-\nple" -> "example"
+  t = t.replace(/(\w)-\n(\w)/g, "$1$2");
+
+  // keep paragraph breaks but collapse single newlines into spaces
+  t = t.replace(/\n{3,}/g, "\n\n").replace(/([^\n])\n([^\n])/g, "$1 $2");
+
+  // normalize bullets to "-" first
+  t = t.replace(/[•●▪︎◦·]/g, "-");
+
+  // (2) list reading normalization: turn bullet items into "Item: ..."
+  // Converts lines that start with "- " into spoken-friendly "Item: "
+  t = t.replace(/^\s*-\s+/gm, "Item: ");
+
+  // clean spacing
+  t = t.replace(/[ \t]{2,}/g, " ").trim();
+
+  // (3) structure smoother
+  t = audiobookPolish(t);
+
+  return t;
+}
+
+function chunkText(text: string, maxChars = 4500) {
+  const paragraphs = text
+    .split(/\n{2,}/g)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const chunks: string[] = [];
+  let cur = "";
+
+  const flush = () => {
+    if (cur.trim()) chunks.push(cur.trim());
+    cur = "";
+  };
+
+  for (const p of paragraphs) {
+    if (p.length > maxChars) {
+      const sentences = p.split(/(?<=[.!?])\s+/);
+      for (const s of sentences) {
+        if ((cur + " " + s).trim().length > maxChars) flush();
+        cur = (cur + " " + s).trim();
+      }
+      continue;
+    }
+
+    if ((cur + "\n\n" + p).trim().length > maxChars) flush();
+    cur = (cur ? cur + "\n\n" : "") + p;
+  }
+
+  flush();
+  return chunks;
+}
+
+function compressPages(pages: number[]) {
+  const uniq = Array.from(new Set(pages)).sort((a, b) => a - b);
+  if (!uniq.length) return "";
+
+  const ranges: Array<[number, number]> = [];
+  let start = uniq[0];
+  let prev = uniq[0];
+
+  for (let i = 1; i < uniq.length; i++) {
+    const p = uniq[i];
+    if (p === prev + 1) prev = p;
+    else {
+      ranges.push([start, prev]);
+      start = prev = p;
+    }
+  }
+  ranges.push([start, prev]);
+
+  const parts = ranges.map(([a, b]) => (a === b ? `${a}` : `${a} through ${b}`));
+
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return `${parts[0]}, and ${parts[1]}`;
+  return parts.slice(0, -1).join(", ") + `, and ${parts[parts.length - 1]}`;
+}
+
+async function fetchBytes(baseUrl: string, url: string) {
+  const res = await fetch(`${baseUrl}/api/blob-bytes?url=${encodeURIComponent(url)}`);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`blob-bytes failed (${res.status}): ${txt}`);
+  }
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+function runNodeExtractor(
+  pdfPath: string
+): Promise<{ numPages: number; pages: { pageNumber: number; text: string }[] }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [join(process.cwd(), "scripts", "extract-pages.mjs"), pdfPath],
+      { maxBuffer: 1024 * 1024 * 40 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        try {
+          resolve(JSON.parse(stdout));
+        } catch {
+          reject(new Error(`Failed to parse extractor output: ${stdout.slice(0, 250)}`));
+        }
+      }
+    );
+  });
+}
+
+async function synthesizeWithRetry(client: any, req: any, tries = 3) {
+  let lastErr: any = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const [resp] = await client.synthesizeSpeech(req);
+      return resp;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 350 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const pdfUrl = body?.pdfUrl;
+    const extractedUrl = body?.extractedUrl;
+    const startPage = Number(body?.startPage);
+    const endPage = Number(body?.endPage);
+    const chapterIndex = Number(body?.chapterIndex);
+    const chapterTitle = String(body?.chapterTitle || "Chapter");
+
+    // voice selection
+    const voiceKey = body?.voiceKey;
+
+    if (!pdfUrl || !Number.isFinite(startPage) || !Number.isFinite(endPage) || !Number.isFinite(chapterIndex)) {
+      return NextResponse.json({ error: "Missing/invalid inputs" }, { status: 400 });
+    }
+
+    const baseUrl = new URL(req.url).origin;
+
+    // Load pages from cache if available
+    let pages: { pageNumber: number; text: string }[] | null = null;
+
+    if (extractedUrl && typeof extractedUrl === "string") {
+      const cachedBuf = await fetchBytes(baseUrl, extractedUrl);
+      const cached = JSON.parse(cachedBuf.toString("utf8"));
+      pages = Array.isArray(cached?.pages) ? cached.pages : null;
+    }
+
+    // Fallback if cache not present
+    if (!pages) {
+      const pdfBuf = await fetchBytes(baseUrl, pdfUrl);
+      const pdfPath = join(tmpdir(), `chapter-${Date.now()}.pdf`);
+      writeFileSync(pdfPath, pdfBuf);
+      const extracted = await runNodeExtractor(pdfPath);
+      pages = extracted.pages;
+    }
+
+    const inRange = pages.filter((p) => p.pageNumber >= startPage && p.pageNumber <= endPage);
+
+    // Clean and polish text for audiobook feel
+    const chapterText = cleanTextForAudio(inRange.map((p) => p.text).join("\n\n"));
+
+    // Visual page detection (no vision)
+    const visualPages = inRange
+      .filter((p) => {
+        const s = (p.text || "").trim();
+        const letters = (s.match(/[A-Za-z]/g) || []).length;
+        const chars = s.length || 1;
+
+        if (chars < 80) return true;
+        if (letters / chars < 0.35 && chars < 220) return true;
+        if (/(figure|table|chart|diagram|exhibit)/i.test(s) && chars < 180) return true;
+
+        return false;
+      })
+      .map((p) => p.pageNumber);
+
+    // (1) Audiobook-style intro pacing (multi-line + natural pause cues)
+    const intro = `Chapter ${chapterIndex}.\n${chapterTitle}.\n`;
+
+    let finalText = `${intro}\n${chapterText}`.trim();
+
+    if (visualPages.length) {
+      const pagesStr = compressPages(visualPages);
+      finalText =
+        (finalText ? finalText + "\n\n" : "") +
+        `For the visuals in this chapter, see pages ${pagesStr}.`;
+    }
+
+    // guardrail
+    if (finalText.length > 200000) {
+      throw new Error("Chapter is too long to render in one pass. Split into smaller chapters.");
+    }
+
+    const client = getGoogleClient();
+
+    const chosen =
+      typeof voiceKey === "string" && CHIRP_HD_VOICES[voiceKey] ? CHIRP_HD_VOICES[voiceKey] : null;
+
+    const languageCode =
+      chosen?.languageCode ||
+      (typeof body?.languageCode === "string" && body.languageCode) ||
+      process.env.GOOGLE_TTS_LANG ||
+      "en-US";
+
+    const voiceName =
+      chosen?.voiceName ||
+      (typeof body?.voiceName === "string" && body.voiceName.trim()) ||
+      process.env.GOOGLE_TTS_VOICE ||
+      "en-US-Neural2-F";
+
+    const chunks = chunkText(finalText, 4500);
+    const mp3Parts: Buffer[] = [];
+
+    for (const chunk of chunks) {
+      const resp = await synthesizeWithRetry(client, {
+        input: { text: chunk },
+        voice: { languageCode, name: voiceName },
+        // (5) Audiobook-ish delivery tuning
+        audioConfig: {
+          audioEncoding: "MP3",
+          speakingRate: 0.98,
+          pitch: 0,
+          volumeGainDb: 1,
+        },
+      });
+
+      if (!resp.audioContent) throw new Error("No audio returned from Google TTS");
+
+      const buf = Buffer.isBuffer(resp.audioContent)
+        ? resp.audioContent
+        : Buffer.from(resp.audioContent as any);
+
+      mp3Parts.push(buf);
+    }
+
+    const mp3 = Buffer.concat(mp3Parts);
+
+    const safeTitle = chapterTitle.replace(/[^\w.\- ]+/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+    const filename = `chapters/${Date.now()}-ch${String(chapterIndex).padStart(2, "0")}-${safeTitle || "Chapter"}.mp3`;
+
+    const blob = await put(filename, mp3, {
+      access: "private",
+      contentType: "audio/mpeg",
+      addRandomSuffix: false,
+    });
+
+    const downloadUrl = `/api/download?url=${encodeURIComponent(blob.url)}&name=${encodeURIComponent(
+      `Chapter_${String(chapterIndex).padStart(2, "0")}.mp3`
+    )}`;
+
+    return NextResponse.json({ downloadUrl, voiceName, languageCode });
+  } catch (err: any) {
+    console.error("RENDER_CHAPTER_ERROR:", err);
+    return NextResponse.json({ error: err?.message || "Failed to render chapter" }, { status: 500 });
+  }
+}
