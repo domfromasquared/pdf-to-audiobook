@@ -21,47 +21,53 @@ function ensureDomMatrixPolyfill() {
   };
 }
 
-let PDFParseCtorPromise: Promise<any> | null = null;
 const require = createRequire(import.meta.url);
 
-async function loadPDFParseCtor() {
-  if (!PDFParseCtorPromise) {
+let pdfjsLibPromise: Promise<any> | null = null;
+
+async function loadPdfJs() {
+  if (!pdfjsLibPromise) {
     ensureDomMatrixPolyfill();
-    PDFParseCtorPromise = Promise.resolve().then(() => require("pdf-parse").PDFParse);
+    pdfjsLibPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((mod: any) => {
+      const pdfjsLib = mod?.getDocument ? mod : mod?.default ?? mod;
+      if (pdfjsLib?.GlobalWorkerOptions) {
+        try {
+          const workerPath = require.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs");
+          pdfjsLib.GlobalWorkerOptions.workerSrc = workerPath;
+        } catch {
+          // If resolve fails, keep default and let caller receive explicit runtime error.
+        }
+      }
+      return pdfjsLib;
+    });
   }
-  return PDFParseCtorPromise;
+  return pdfjsLibPromise;
 }
 
 export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
-  const PDFParse = await loadPDFParseCtor();
-  if (typeof (PDFParse as any).setWorker === "function") {
-    (PDFParse as any).setWorker(
-      "https://cdn.jsdelivr.net/npm/pdf-parse@2.4.5/dist/pdf-parse/web/pdf.worker.min.mjs"
-    );
+  const pdfjsLib = await loadPdfJs();
+  const data = new Uint8Array(pdfBuffer);
+
+  const loadingTask = pdfjsLib.getDocument({
+    data,
+    useSystemFonts: true,
+    disableFontFace: true,
+  });
+
+  const pdf = await loadingTask.promise;
+
+  const pages: { pageNumber: number; text: string }[] = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+
+    const strings = content.items
+      .map((it: any) => (typeof it.str === "string" ? it.str : ""))
+      .filter(Boolean);
+
+    const text = strings.join(" ").replace(/\s+/g, " ").trim();
+    pages.push({ pageNumber: i, text });
   }
 
-  const parser = new PDFParse({
-    data: new Uint8Array(pdfBuffer),
-    // Keep parsing on the server side when possible.
-    disableWorker: true,
-    worker: null,
-  } as any);
-
-  try {
-    const result = await parser.getText({ pageJoiner: "" });
-
-    const pages: { pageNumber: number; text: string }[] = (result.pages || [])
-      .map((p: any) => ({
-        pageNumber: Number(p?.num || 0),
-        text: String(p?.text || "").replace(/\s+/g, " ").trim(),
-      }))
-      .filter((p: { pageNumber: number; text: string }) => Number.isFinite(p.pageNumber) && p.pageNumber > 0);
-
-    return {
-      numPages: pages.length,
-      pages,
-    };
-  } finally {
-    await parser.destroy().catch(() => {});
-  }
+  return { numPages: pdf.numPages, pages };
 }
