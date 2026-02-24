@@ -1,3 +1,5 @@
+import { createRequire } from "module";
+
 export type ExtractedPages = {
   numPages: number;
   pages: { pageNumber: number; text: string }[];
@@ -20,10 +22,12 @@ function ensureDomMatrixPolyfill() {
 }
 
 let PDFParseCtorPromise: Promise<any> | null = null;
+const require = createRequire(import.meta.url);
+
 async function loadPDFParseCtor() {
   if (!PDFParseCtorPromise) {
     ensureDomMatrixPolyfill();
-    PDFParseCtorPromise = import("pdf-parse").then((mod: any) => mod.PDFParse);
+    PDFParseCtorPromise = Promise.resolve().then(() => require("pdf-parse").PDFParse);
   }
   return PDFParseCtorPromise;
 }
