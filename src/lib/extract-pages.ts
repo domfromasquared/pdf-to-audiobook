@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-
 export type ExtractedPages = {
   numPages: number;
   pages: { pageNumber: number; text: string }[];
@@ -21,23 +19,18 @@ function ensureDomMatrixPolyfill() {
   };
 }
 
-const require = createRequire(import.meta.url);
-
 let pdfjsLibPromise: Promise<any> | null = null;
 
 async function loadPdfJs() {
   if (!pdfjsLibPromise) {
     ensureDomMatrixPolyfill();
-    pdfjsLibPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((mod: any) => {
-      const pdfjsLib = mod?.getDocument ? mod : mod?.default ?? mod;
-      if (pdfjsLib?.GlobalWorkerOptions) {
-        try {
-          const workerPath = require.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs");
-          pdfjsLib.GlobalWorkerOptions.workerSrc = workerPath;
-        } catch {
-          // If resolve fails, keep default and let caller receive explicit runtime error.
-        }
-      }
+    pdfjsLibPromise = Promise.all([
+      import("pdfjs-dist/legacy/build/pdf.mjs"),
+      import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
+    ]).then(([pdfMod, workerMod]: any[]) => {
+      // Seed the worker module to avoid pdfjs dynamic worker import resolution in serverless bundles.
+      (globalThis as any).pdfjsWorker = workerMod;
+      const pdfjsLib = pdfMod?.getDocument ? pdfMod : pdfMod?.default ?? pdfMod;
       return pdfjsLib;
     });
   }
@@ -50,7 +43,6 @@ export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<Extr
 
   const loadingTask = pdfjsLib.getDocument({
     data,
-    disableWorker: true,
     useSystemFonts: true,
     disableFontFace: true,
   });
