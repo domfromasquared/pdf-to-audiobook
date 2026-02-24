@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { put, get } from "@vercel/blob";
-import { extractPagesFromPdfBuffer } from "@/lib/extract-pages";
 
 export const runtime = "nodejs";
 
@@ -19,12 +18,18 @@ function cleanTitle(s: string) {
   return s.replace(/\s+/g, " ").trim().slice(0, 120) || "Chapter";
 }
 
+function blobUrlToPathname(blobUrl: string) {
+  const u = new URL(blobUrl);
+  return u.pathname.replace(/^\/+/, "");
+}
+
 // Read private blob bytes directly (avoids calling /api/blob-bytes, so no Deployment Protection issues)
 async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
   if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN");
 
-  const blobRes: any = await get(url, { token, access: "private" } as any);
+  const pathname = blobUrlToPathname(url);
+  const blobRes: any = await get(pathname, { token, access: "private" } as any);
 
   // Some SDK responses include `body`, some include `data`
   if (blobRes?.data) {
@@ -65,6 +70,9 @@ async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
 }
 
 async function detectChapters(pdfUrl: string) {
+  // Lazy import keeps route boot resilient: module-load failures become JSON errors.
+  const { extractPagesFromPdfBuffer } = await import("@/lib/extract-pages");
+
   // Fetch PDF bytes directly from private blob (no internal HTTP call)
   const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
 
