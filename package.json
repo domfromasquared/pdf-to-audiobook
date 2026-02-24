@@ -15,6 +15,7 @@
   "dependencies": {
     "@google-cloud/text-to-speech": "^6.4.0",
     "@vercel/blob": "^2.3.0",
+    "fflate": "^0.8.2",
     "next": "16.1.6",
     "pdfjs-dist": "^5.4.624",
     "react": "19.2.3",

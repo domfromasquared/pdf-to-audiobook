@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { zipSync } from "fflate";
 import styles from "./page.module.css";
 
 type Chapter = {
@@ -17,6 +18,12 @@ type VoiceOption = "Iapetus" | "Enceladus" | "Orus" | "Leda" | "Callirrhoe";
 type GeneratingAllState = {
   active: boolean;
   currentChapterIndex: number | null;
+  completedCount: number;
+  totalCount: number;
+};
+
+type DownloadAllState = {
+  active: boolean;
   completedCount: number;
   totalCount: number;
 };
@@ -106,6 +113,11 @@ export default function Home() {
   });
   const [generatingByChapter, setGeneratingByChapter] = useState<Record<number, boolean>>({});
   const [downloadingByChapter, setDownloadingByChapter] = useState<Record<number, boolean>>({});
+  const [downloadingAll, setDownloadingAll] = useState<DownloadAllState>({
+    active: false,
+    completedCount: 0,
+    totalCount: 0,
+  });
 
   const [error, setError] = useState<string | null>(null);
   const [lastActionMessage, setLastActionMessage] = useState("Idle. Upload a PDF to begin.");
@@ -120,6 +132,19 @@ export default function Home() {
   );
 
   const canGenerateAll = readyForGeneration && !generatingAll.active;
+
+  const downloadableChapters = useMemo(() => {
+    if (!chapters?.length) return [];
+    return chapters
+      .filter((ch) => Boolean(chapterDownloads[ch.index]))
+      .sort((a, b) => a.index - b.index)
+      .map((ch) => ({
+        chapter: ch,
+        url: chapterDownloads[ch.index],
+      }));
+  }, [chapters, chapterDownloads]);
+
+  const canDownloadAll = downloadableChapters.length >= 1 && !downloadingAll.active;
 
   const firstGeneratingChapter = useMemo(() => {
     const found = Object.entries(generatingByChapter).find(([, active]) => active);
@@ -151,6 +176,13 @@ export default function Home() {
         busy: true,
       };
     }
+    if (downloadingAll.active) {
+      return {
+        message: `Preparing ZIP (${downloadingAll.completedCount}/${downloadingAll.totalCount})…`,
+        subtext: "Fetching generated chapter files and packaging them into one download.",
+        busy: true,
+      };
+    }
     if (firstGeneratingChapter != null) {
       return {
         message: `Generating chapter ${firstGeneratingChapter}…`,
@@ -170,7 +202,7 @@ export default function Home() {
       subtext: "After upload, chapter detection runs automatically.",
       busy: false,
     };
-  }, [isUploading, isDetecting, generatingAll, firstGeneratingChapter, hasChapters, chapters, numPages]);
+  }, [isUploading, isDetecting, generatingAll, downloadingAll, firstGeneratingChapter, hasChapters, chapters, numPages]);
 
   useEffect(() => {
     setLastActionMessage(activity.message);
@@ -196,9 +228,18 @@ export default function Home() {
     setGeneratingAll({ active: false, currentChapterIndex: null, completedCount: 0, totalCount: 0 });
     setGeneratingByChapter({});
     setDownloadingByChapter({});
+    setDownloadingAll({ active: false, completedCount: 0, totalCount: 0 });
     setChapterDownloads({});
     setChapterStatus({});
     setChapterErrors({});
+  }
+
+  function sanitizeFilenamePart(input: string) {
+    const cleaned = (input || "")
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return cleaned || "Chapter";
   }
 
   async function detectChaptersForUrl(uploadedPdfUrl: string) {
@@ -473,6 +514,60 @@ export default function Home() {
     }, 1800);
   }
 
+  async function downloadAllZip() {
+    if (!canDownloadAll || downloadingAll.active) return;
+
+    setError(null);
+    setDownloadingAll({
+      active: true,
+      completedCount: 0,
+      totalCount: downloadableChapters.length,
+    });
+    setLastActionMessage("Preparing ZIP download.");
+
+    try {
+      const files: Record<string, Uint8Array> = {};
+      let completedCount = 0;
+
+      for (const item of downloadableChapters) {
+        const chapterIndex = item.chapter.index;
+        const res = await fetch(item.url, { method: "GET" });
+        if (!res.ok) {
+          throw new Error(`Failed to fetch chapter ${chapterIndex} (${res.status})`);
+        }
+        const arrayBuffer = await res.arrayBuffer();
+        const index = String(chapterIndex).padStart(2, "0");
+        const safeTitle = sanitizeFilenamePart(item.chapter.title);
+        const filename = `${index} - ${safeTitle}.mp3`;
+        files[filename] = new Uint8Array(arrayBuffer);
+
+        completedCount += 1;
+        setDownloadingAll((prev) => ({ ...prev, completedCount }));
+      }
+
+      const zipBytes = zipSync(files);
+      const zipBuffer = Uint8Array.from(zipBytes).buffer;
+      const blob = new Blob([zipBuffer], { type: "application/zip" });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = "audiobook.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+
+      setLastActionMessage(`ZIP ready. Downloaded ${downloadableChapters.length} chapters.`);
+    } catch (e: any) {
+      setError(e?.message || "Failed to prepare ZIP download.");
+    } finally {
+      setDownloadingAll((prev) => ({
+        ...prev,
+        active: false,
+      }));
+    }
+  }
+
   return (
     <main className={styles.page}>
       <div className={styles.bgGlowA} aria-hidden="true" />
@@ -576,6 +671,22 @@ export default function Home() {
                       />
                     ) : (
                       "Generate all MP3s"
+                    )}
+                  </button>
+
+                  <button
+                    className={cx(styles.btn, styles.btnSecondary)}
+                    onClick={downloadAllZip}
+                    disabled={!canDownloadAll}
+                    aria-busy={downloadingAll.active}
+                  >
+                    {downloadingAll.active ? (
+                      <Spinner
+                        label={`Preparing ZIP (${downloadingAll.completedCount}/${downloadingAll.totalCount})…`}
+                        small
+                      />
+                    ) : (
+                      "Download all (.zip)"
                     )}
                   </button>
 
