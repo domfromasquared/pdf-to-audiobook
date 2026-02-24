@@ -67,59 +67,69 @@ async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
 }
 
 async function detectChapters(pdfUrl: string) {
-  const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
-  const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
-
-  let extractedUrl: string | null = null;
+  let step = "read-pdf-blob";
   try {
-    const extractedBlob = await put(
-      `extracted/${Date.now()}-pages.json`,
-      Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
-      { access: "private", contentType: "application/json", addRandomSuffix: false }
-    );
-    extractedUrl = extractedBlob.url;
-  } catch (cacheErr) {
-    console.warn("CHAPTERS_CACHE_WRITE_WARNING:", cacheErr);
-  }
+    const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
+    step = "extract-pages";
+    const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
 
-  const candidates: { page: number; title: string }[] = [];
-  for (const p of pages) {
-    const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
-    if (looksLikeHeading(firstChunk)) {
-      candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
+    let extractedUrl: string | null = null;
+    try {
+      step = "write-extraction-cache";
+      const extractedBlob = await put(
+        `extracted/${Date.now()}-pages.json`,
+        Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
+        { access: "private", contentType: "application/json", addRandomSuffix: false }
+      );
+      extractedUrl = extractedBlob.url;
+    } catch (cacheErr) {
+      console.warn("CHAPTERS_CACHE_WRITE_WARNING:", cacheErr);
     }
+
+    step = "detect-headings";
+    const candidates: { page: number; title: string }[] = [];
+    for (const p of pages) {
+      const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
+      if (looksLikeHeading(firstChunk)) {
+        candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
+      }
+    }
+
+    let chapters: Chapter[] =
+      candidates.length >= 2
+        ? candidates.map((c, idx) => {
+            const startPage = c.page;
+            const endPage = (candidates[idx + 1]?.page ?? numPages + 1) - 1;
+            return {
+              index: idx + 1,
+              title: c.title || `Chapter ${idx + 1}`,
+              startPage,
+              endPage: Math.max(startPage, Math.min(endPage, numPages)),
+            };
+          })
+        : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
+
+    const firstStart = chapters[0]?.startPage ?? 1;
+    if (firstStart > 1) {
+      const frontMatter: Chapter = {
+        index: 1,
+        title: "Front Matter",
+        startPage: 1,
+        endPage: firstStart - 1,
+      };
+
+      chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
+    }
+
+    return NextResponse.json({ numPages, chapters, extractedUrl });
+  } catch (err: any) {
+    err.step = step;
+    throw err;
   }
-
-  let chapters: Chapter[] =
-    candidates.length >= 2
-      ? candidates.map((c, idx) => {
-          const startPage = c.page;
-          const endPage = (candidates[idx + 1]?.page ?? numPages + 1) - 1;
-          return {
-            index: idx + 1,
-            title: c.title || `Chapter ${idx + 1}`,
-            startPage,
-            endPage: Math.max(startPage, Math.min(endPage, numPages)),
-          };
-        })
-      : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
-
-  const firstStart = chapters[0]?.startPage ?? 1;
-  if (firstStart > 1) {
-    const frontMatter: Chapter = {
-      index: 1,
-      title: "Front Matter",
-      startPage: 1,
-      endPage: firstStart - 1,
-    };
-
-    chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
-  }
-
-  return NextResponse.json({ numPages, chapters, extractedUrl });
 }
 
 export async function POST(req: Request) {
+  let step = "parse-request";
   try {
     const body = await req.json().catch(() => ({}));
     const pdfUrl = body?.pdfUrl;
@@ -128,14 +138,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
     }
 
+    step = "detect-chapters";
     return await detectChapters(pdfUrl);
   } catch (err: any) {
-    console.error("CHAPTERS_ERROR:", err);
-    return NextResponse.json({ error: err?.message || "Failed to detect chapters" }, { status: 500 });
+    if (err?.step) step = err.step;
+    const message = err?.message || "Failed to detect chapters";
+    console.error("CHAPTERS_ERROR:", { step, message, err });
+    return NextResponse.json({ error: message, step }, { status: 500 });
   }
 }
 
 export async function GET(req: Request) {
+  let step = "parse-request";
   try {
     const { searchParams } = new URL(req.url);
     const pdfUrl = searchParams.get("pdfUrl");
@@ -144,10 +158,13 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
     }
 
+    step = "detect-chapters";
     return await detectChapters(pdfUrl);
   } catch (err: any) {
-    console.error("CHAPTERS_ERROR:", err);
-    return NextResponse.json({ error: err?.message || "Failed to detect chapters" }, { status: 500 });
+    if (err?.step) step = err.step;
+    const message = err?.message || "Failed to detect chapters";
+    console.error("CHAPTERS_ERROR:", { step, message, err });
+    return NextResponse.json({ error: message, step }, { status: 500 });
   }
 }
 
