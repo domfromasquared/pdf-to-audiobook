@@ -56,6 +56,22 @@ export default function Home() {
     return "Upload a PDF to begin";
   }, [uploading, detecting, chapters, numPages]);
 
+  async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs = 240000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {}
+      return { res, raw, data };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function detectChaptersForUrl(uploadedPdfUrl: string) {
     if (!uploadedPdfUrl || typeof uploadedPdfUrl !== "string") {
       setError("Upload succeeded, but no PDF URL was available for chapter detection.");
@@ -186,25 +202,23 @@ export default function Home() {
     setChapterStatus((prev) => ({ ...prev, [ch.index]: "generating" }));
 
     try {
-      const res = await fetch("/api/render-chapter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pdfUrl,
-          extractedUrl,
-          startPage: ch.startPage,
-          endPage: ch.endPage,
-          chapterIndex: ch.index,
-          chapterTitle: ch.title,
-          voiceKey: selectedVoice,
-        }),
-      });
-
-      const raw = await res.text();
-      let data: any = null;
-      try {
-        data = raw ? JSON.parse(raw) : null;
-      } catch {}
+      const { res, raw, data } = await fetchJsonWithTimeout(
+        "/api/render-chapter",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pdfUrl,
+            extractedUrl,
+            startPage: ch.startPage,
+            endPage: ch.endPage,
+            chapterIndex: ch.index,
+            chapterTitle: ch.title,
+            voiceKey: selectedVoice,
+          }),
+        },
+        240000
+      );
 
       if (!res.ok) {
         const msg = data?.error || raw || `Render failed (${res.status})`;
@@ -223,7 +237,10 @@ export default function Home() {
       setChapterDownloads((prev) => ({ ...prev, [ch.index]: data.downloadUrl }));
       setChapterStatus((prev) => ({ ...prev, [ch.index]: "done" }));
     } catch (e: any) {
-      const msg = e?.message || "Failed generating chapter";
+      const msg =
+        e?.name === "AbortError"
+          ? "Generation timed out after 4 minutes. Try a smaller chapter/page range."
+          : e?.message || "Failed generating chapter";
       setChapterStatus((prev) => ({ ...prev, [ch.index]: "error" }));
       setChapterErrors((prev) => ({ ...prev, [ch.index]: msg }));
     }
@@ -246,25 +263,23 @@ export default function Home() {
 
         setChapterStatus((prev) => ({ ...prev, [ch.index]: "generating" }));
 
-        const res = await fetch("/api/render-chapter", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            pdfUrl,
-            extractedUrl,
-            startPage: ch.startPage,
-            endPage: ch.endPage,
-            chapterIndex: ch.index,
-            chapterTitle: ch.title,
-            voiceKey: selectedVoice,
-          }),
-        });
-
-        const raw = await res.text();
-        let data: any = null;
-        try {
-          data = raw ? JSON.parse(raw) : null;
-        } catch {}
+        const { res, raw, data } = await fetchJsonWithTimeout(
+          "/api/render-chapter",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              pdfUrl,
+              extractedUrl,
+              startPage: ch.startPage,
+              endPage: ch.endPage,
+              chapterIndex: ch.index,
+              chapterTitle: ch.title,
+              voiceKey: selectedVoice,
+            }),
+          },
+          240000
+        );
 
         if (!res.ok) {
           const msg = data?.error || raw || `Render failed (${res.status})`;
@@ -284,7 +299,11 @@ export default function Home() {
         setChapterStatus((prev) => ({ ...prev, [ch.index]: "done" }));
       }
     } catch (e: any) {
-      setError(e?.message || "Failed generating chapters");
+      const msg =
+        e?.name === "AbortError"
+          ? "Generation timed out after 4 minutes. Try generating one chapter at a time."
+          : e?.message || "Failed generating chapters";
+      setError(msg);
     } finally {
       setGenerating(false);
     }

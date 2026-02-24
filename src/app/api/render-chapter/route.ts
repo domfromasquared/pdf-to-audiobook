@@ -3,6 +3,7 @@ import { put } from "@vercel/blob";
 import textToSpeech from "@google-cloud/text-to-speech";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const CHIRP_HD_VOICES: Record<string, { languageCode: string; voiceName: string }> = {
   Iapetus: { languageCode: "en-US", voiceName: "en-US-Chirp3-HD-Iapetus" },
