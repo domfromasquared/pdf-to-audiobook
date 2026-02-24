@@ -1,60 +1,110 @@
-# PDF to Chapter Audiobook
 
-Internal web app to upload a PDF, auto-detect chapter ranges, generate per-chapter MP3s with Google TTS, and download each chapter audio file.
+## Launch (Employee Use + Admin Setup)
 
-## Stack
+### What this is
 
-- Next.js App Router (Node runtime API routes)
-- Vercel Blob (private storage)
-- Google Cloud Text-to-Speech
+This internal web app lets employees upload a PDF, auto-detect chapters, and generate downloadable MP3s per chapter using realistic Google voices. PDFs and generated audio are stored privately in Vercel Blob.
 
-## Employee Usage
+---
 
-1. Open the deployed app URL.
-2. Upload a PDF.
-3. Wait for automatic chapter detection.
-4. Choose a voice.
-5. Generate all chapters or one-by-one.
-6. Download MP3 files.
+## For Employees (How to Use)
 
-## Voices
+1. Open the app: **[https://YOUR-VERCEL-URL.vercel.app](https://YOUR-VERCEL-URL.vercel.app)**
+2. Click **Upload PDF** and select a file.
+3. After upload, chapters are auto-detected and listed with page ranges.
+4. Pick a voice (use the inline preview player to sample it).
+5. Click:
 
-- Iapetus
-- Enceladus
-- Orus
-- Leda
-- Callirrhoe
+   * **Generate all MP3s** to render every chapter, or
+   * **Generate** next to a specific chapter.
+6. When generation finishes, click **Download** to save the MP3.
 
-Voice previews are served from `public/previews/*.mp3`.
+Notes:
 
-## Local Development
+* **Regenerate** will rebuild audio for that chapter using the currently selected voice.
+* Downloads stream from private storage via the app’s `/api/download` route.
 
-```bash
-npm install
-npm run dev
+---
+
+## For Admins (Vercel Setup)
+
+### 1) Import + Deploy
+
+* In Vercel: **New Project → Import Git Repo**
+* Framework should auto-detect as **Next.js**.
+
+### 2) Environment Variables (Required)
+
+Set these in **Vercel → Project → Settings → Environment Variables**:
+
+* `BLOB_READ_WRITE_TOKEN`
+  Used to read/write private blobs.
+* `GOOGLE_TTS_KEY_B64`
+  Base64-encoded Google service account JSON for Text-to-Speech.
+
+Optional:
+
+* `GOOGLE_TTS_LANG` (default recommended: `en-US`)
+
+After setting env vars, redeploy.
+
+### 3) Vercel Blob
+
+* Confirm **Vercel Blob storage** is connected to the project.
+* Private blob storage is expected (matches the app’s design).
+
+### 4) Deployment Protection (Important)
+
+If **Deployment Protection** is enabled, it can block API routes and cause server-to-server calls to return an “Authentication Required” page.
+
+Recommended for internal production use:
+
+* Disable protection for the production deployment, **or**
+* Configure a bypass strategy (if your org requires protection).
+
+### 5) Node Version (Recommended)
+
+Pin Node to avoid runtime surprises:
+
+**package.json**
+
+```json
+{
+  "engines": { "node": "20.x" }
+}
 ```
 
-Open `http://localhost:3000`.
+---
 
-## Required Environment Variables
+## Voice Previews
 
-Create `.env.local` for local dev, and set the same values in Vercel project settings.
+Voice preview audio is committed to the repo and served statically:
 
-- `GOOGLE_TTS_KEY_B64` (required): base64-encoded Google service account JSON for TTS.
-- `BLOB_READ_WRITE_TOKEN` (recommended): token for private Blob read/write fallback mode.
-- `GOOGLE_TTS_LANG` (optional): default language code, e.g. `en-US`.
+* `public/previews/iapetus.mp3`
+* `public/previews/enceladus.mp3`
+* `public/previews/orus.mp3`
+* `public/previews/leda.mp3`
+* `public/previews/callirrhoe.mp3`
 
-See `.env.example` for placeholders.
+The UI loads previews from:
+`/previews/<voice>.mp3`
 
-## Vercel Launch Checklist
+---
 
-1. Connect this GitHub repo to Vercel.
-2. Set environment variables in Vercel Project Settings.
-3. Ensure Blob store is connected and private.
-4. Deploy `main`.
-5. Verify these routes respond: `/api/upload`, `/api/chapters`, `/api/render-chapter`, `/api/download`.
+## Security Notes
 
-## Notes
+* Do **not** commit secrets:
 
-- `/api/chapters` and `/api/render-chapter` read private blobs directly through the Blob SDK (no internal HTTP hop required).
-- ZIP endpoint is intentionally removed from active routing for launch stability.
+  * `.env.local` must be gitignored
+  * Any raw service account JSON must be gitignored
+* Recommend including a `.env.example` with placeholders only.
+
+---
+
+## Troubleshooting (Quick)
+
+* **API returns HTML “Authentication Required”** → Deployment Protection is intercepting requests.
+* **Chapters endpoint returns 405** → Verify `export async function POST()` exists in `src/app/api/chapters/route.ts` and the frontend uses `method: "POST"`.
+* **PDF extraction fails on Vercel (DOMMatrix / pdfjs issues)** → Use a Node-safe PDF extraction approach (legacy build + polyfills or swap extractor library), and avoid runtime `execFile` calls to `/scripts`.
+
+---
