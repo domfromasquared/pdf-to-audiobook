@@ -1,11 +1,6 @@
 // src/lib/extract-pages.ts
 
 // --- Server polyfills for pdfjs in Node ---
-declare global {
-  // eslint-disable-next-line no-var
-  var DOMMatrix: any;
-}
-
 // Minimal DOMMatrix polyfill (pdfjs uses it for transforms)
 if (typeof (globalThis as any).DOMMatrix === "undefined") {
   (globalThis as any).DOMMatrix = class DOMMatrix {
