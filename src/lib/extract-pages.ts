@@ -1,5 +1,4 @@
-// src/lib/extract-pages.ts
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { PDFParse } from "pdf-parse";
 
 export type ExtractedPages = {
   numPages: number;
@@ -7,24 +6,17 @@ export type ExtractedPages = {
 };
 
 export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
-  const data = new Uint8Array(pdfBuffer);
+  const parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
+  try {
+    const result = await parser.getText({ pageJoiner: "" });
+    const pages = (result.pages || []).map((p: any) => ({
+      pageNumber: Number(p?.num || 0),
+      text: String(p?.text || "").replace(/\s+/g, " ").trim(),
+    }));
 
-  const loadingTask = (pdfjsLib as any).getDocument({ data });
-  const pdf = await loadingTask.promise;
-
-  const pages: { pageNumber: number; text: string }[] = [];
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-
-    const strings = content.items
-      .map((it: any) => (typeof it.str === "string" ? it.str : ""))
-      .filter(Boolean);
-
-    const text = strings.join(" ").replace(/\s+/g, " ").trim();
-    pages.push({ pageNumber: i, text });
+    const normalized = pages.filter((p) => Number.isFinite(p.pageNumber) && p.pageNumber > 0);
+    return { numPages: normalized.length, pages: normalized };
+  } finally {
+    await parser.destroy().catch(() => {});
   }
-
-  return { numPages: pdf.numPages, pages };
 }
