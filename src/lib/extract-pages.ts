@@ -1,30 +1,7 @@
-import { PDFParse } from "pdf-parse";
-
 export type ExtractedPages = {
   numPages: number;
   pages: { pageNumber: number; text: string }[];
 };
-
-async function extractWithPdfParse(pdfBuffer: Buffer): Promise<ExtractedPages> {
-  const parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
-  try {
-    const result = await parser.getText({ pageJoiner: "" });
-
-    const pages = (result.pages || [])
-      .map((p: any) => ({
-        pageNumber: Number(p?.num || 0),
-        text: String(p?.text || "").replace(/\s+/g, " ").trim(),
-      }))
-      .filter((p) => Number.isFinite(p.pageNumber) && p.pageNumber > 0);
-
-    return {
-      numPages: pages.length,
-      pages,
-    };
-  } finally {
-    await parser.destroy().catch(() => {});
-  }
-}
 
 function ensureDomMatrixPolyfill() {
   if (typeof (globalThis as any).DOMMatrix !== "undefined") return;
@@ -53,7 +30,7 @@ async function loadPdfJs() {
   return pdfjsLibPromise;
 }
 
-async function extractWithPdfJs(pdfBuffer: Buffer): Promise<ExtractedPages> {
+export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
   const pdfjsLib = await loadPdfJs();
   const data = new Uint8Array(pdfBuffer);
   const loadingTask = pdfjsLib.getDocument({
@@ -77,18 +54,4 @@ async function extractWithPdfJs(pdfBuffer: Buffer): Promise<ExtractedPages> {
   }
 
   return { numPages: pdf.numPages, pages };
-}
-
-export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
-  try {
-    return await extractWithPdfParse(pdfBuffer);
-  } catch (pdfParseErr: any) {
-    try {
-      return await extractWithPdfJs(pdfBuffer);
-    } catch (pdfJsErr: any) {
-      const p1 = pdfParseErr?.message || "pdf-parse failed";
-      const p2 = pdfJsErr?.message || "pdfjs failed";
-      throw new Error(`Failed to extract PDF pages (${p1}; ${p2})`);
-    }
-  }
 }
