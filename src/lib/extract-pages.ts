@@ -34,7 +34,18 @@ async function loadPDFParseCtor() {
 
 export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
   const PDFParse = await loadPDFParseCtor();
-  const parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
+  if (typeof (PDFParse as any).setWorker === "function") {
+    (PDFParse as any).setWorker(
+      "https://cdn.jsdelivr.net/npm/pdf-parse@2.4.5/dist/pdf-parse/web/pdf.worker.min.mjs"
+    );
+  }
+
+  const parser = new PDFParse({
+    data: new Uint8Array(pdfBuffer),
+    // Keep parsing on the server side when possible.
+    disableWorker: true,
+    worker: null,
+  } as any);
 
   try {
     const result = await parser.getText({ pageJoiner: "" });
