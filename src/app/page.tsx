@@ -71,20 +71,29 @@ export default function Home() {
     setChapterErrors({});
 
     try {
-      const res = await fetch("/api/chapters", {
+      let res = await fetch("/api/chapters", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pdfUrl: uploadedPdfUrl }),
       });
 
+      if (res.status === 405) {
+        const qs = new URLSearchParams({ pdfUrl: uploadedPdfUrl });
+        res = await fetch(`/api/chapters?${qs.toString()}`, { method: "GET" });
+      }
+
+      const contentType = res.headers.get("content-type") || "";
       const raw = await res.text();
       let data: any = null;
       try {
-        data = raw ? JSON.parse(raw) : null;
+        data = raw && contentType.includes("application/json") ? JSON.parse(raw) : null;
       } catch {}
 
       if (!res.ok) {
-        setError(data?.error || raw || `Detect chapters failed (${res.status})`);
+        const fallbackMsg = contentType.includes("text/html")
+          ? `Detect chapters failed (${res.status}) — server returned HTML instead of JSON.`
+          : `Detect chapters failed (${res.status})`;
+        setError(data?.error || fallbackMsg);
         setDetecting(false);
         return;
       }

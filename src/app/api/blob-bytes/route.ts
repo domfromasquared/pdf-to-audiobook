@@ -18,13 +18,16 @@ export async function GET(req: Request) {
     }
 
     const token = process.env.BLOB_READ_WRITE_TOKEN;
-    if (!token) {
-      return NextResponse.json({ error: "Missing BLOB_READ_WRITE_TOKEN" }, { status: 500 });
+    const readOpts: any = { access: "private" };
+    if (token) readOpts.token = token;
+
+    let result: any;
+    try {
+      result = await get(url, readOpts);
+    } catch {
+      const pathname = blobUrlToPathname(url);
+      result = await get(pathname, readOpts);
     }
-
-    const pathname = blobUrlToPathname(url);
-
-    const result: any = await get(pathname, { access: "private", token });
 
     if (result?.statusCode && result.statusCode !== 200) {
       return NextResponse.json({ error: "Blob not found" }, { status: 404 });

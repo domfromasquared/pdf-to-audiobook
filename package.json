@@ -2,6 +2,9 @@
   "name": "pdf-to-audiobook",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "next dev --webpack",
     "generate:previews": "node scripts/generate-previews.mjs",
@@ -12,7 +15,6 @@
   "dependencies": {
     "@google-cloud/text-to-speech": "^6.4.0",
     "@vercel/blob": "^2.3.0",
-    "archiver": "^7.0.1",
     "next": "16.1.6",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.624",

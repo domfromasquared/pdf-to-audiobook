@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PDF to Chapter Audiobook
 
-## Getting Started
+Internal web app to upload a PDF, auto-detect chapter ranges, generate per-chapter MP3s with Google TTS, and download each chapter audio file.
 
-First, run the development server:
+## Stack
+
+- Next.js App Router (Node runtime API routes)
+- Vercel Blob (private storage)
+- Google Cloud Text-to-Speech
+
+## Employee Usage
+
+1. Open the deployed app URL.
+2. Upload a PDF.
+3. Wait for automatic chapter detection.
+4. Choose a voice.
+5. Generate all chapters or one-by-one.
+6. Download MP3 files.
+
+## Voices
+
+- Iapetus
+- Enceladus
+- Orus
+- Leda
+- Callirrhoe
+
+Voice previews are served from `public/previews/*.mp3`.
+
+## Local Development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Required Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create `.env.local` for local dev, and set the same values in Vercel project settings.
 
-## Learn More
+- `GOOGLE_TTS_KEY_B64` (required): base64-encoded Google service account JSON for TTS.
+- `BLOB_READ_WRITE_TOKEN` (recommended): token for private Blob read/write fallback mode.
+- `GOOGLE_TTS_LANG` (optional): default language code, e.g. `en-US`.
 
-To learn more about Next.js, take a look at the following resources:
+See `.env.example` for placeholders.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Vercel Launch Checklist
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Connect this GitHub repo to Vercel.
+2. Set environment variables in Vercel Project Settings.
+3. Ensure Blob store is connected and private.
+4. Deploy `main`.
+5. Verify these routes respond: `/api/upload`, `/api/chapters`, `/api/render-chapter`, `/api/download`.
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `/api/chapters` and `/api/render-chapter` read private blobs directly through the Blob SDK (no internal HTTP hop required).
+- ZIP endpoint is intentionally removed from active routing for launch stability.
