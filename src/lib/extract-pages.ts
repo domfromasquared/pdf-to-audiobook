@@ -17,8 +17,16 @@ if (typeof (globalThis as any).DOMMatrix === "undefined") {
   };
 }
 
-// IMPORTANT: use legacy build in Node
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+let pdfjsLibPromise: Promise<any> | null = null;
+
+async function loadPdfJs() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((mod: any) =>
+      mod?.getDocument ? mod : mod?.default ?? mod
+    );
+  }
+  return pdfjsLibPromise;
+}
 
 export type ExtractedPages = {
   numPages: number;
@@ -26,9 +34,10 @@ export type ExtractedPages = {
 };
 
 export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
+  const pdfjsLib = await loadPdfJs();
   const data = new Uint8Array(pdfBuffer);
 
-  const loadingTask = (pdfjsLib as any).getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data,
     // These options reduce Node/browser coupling
     useSystemFonts: true,
