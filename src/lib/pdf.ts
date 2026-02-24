@@ -1,4 +1,4 @@
-import { head } from "@vercel/blob";
+import { PDFParse } from "pdf-parse";
 
 async function fetchPrivateBlobAsUint8Array(baseUrl: string, blobUrl: string): Promise<Uint8Array> {
   const res = await fetch(`${baseUrl}/api/blob-bytes?url=${encodeURIComponent(blobUrl)}`);
@@ -10,33 +10,19 @@ async function fetchPrivateBlobAsUint8Array(baseUrl: string, blobUrl: string): P
   return new Uint8Array(ab);
 }
 
-async function loadPdfJs() {
-  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  return pdfjsLib as any;
-}
-
 export async function extractPdfPagesFromPrivateBlob(baseUrl: string, pdfUrl: string) {
   const data = await fetchPrivateBlobAsUint8Array(baseUrl, pdfUrl);
+  const parser = new PDFParse({ data });
+  try {
+    const result = await parser.getText({ pageJoiner: "" });
+    const pages = (result.pages || []).map((p: any) => ({
+      pageNumber: Number(p?.num || 0),
+      text: String(p?.text || "").replace(/\s+/g, " ").trim(),
+    }));
 
-  const pdfjsMod: any = await loadPdfJs();
-  const pdfjsLib: any = pdfjsMod?.getDocument ? pdfjsMod : pdfjsMod?.default ?? pdfjsMod;
-
-  const loadingTask = pdfjsLib.getDocument({ data });
-  const pdf = await loadingTask.promise;
-
-  const pages: { pageNumber: number; text: string }[] = [];
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-
-    const strings = content.items
-      .map((it: any) => (typeof it.str === "string" ? it.str : ""))
-      .filter(Boolean);
-
-    const text = strings.join(" ").replace(/\s+/g, " ").trim();
-    pages.push({ pageNumber: i, text });
+    const normalized = pages.filter((p) => Number.isFinite(p.pageNumber) && p.pageNumber > 0);
+    return { numPages: normalized.length, pages: normalized };
+  } finally {
+    await parser.destroy().catch(() => {});
   }
-
-  return { numPages: pdf.numPages, pages };
 }
