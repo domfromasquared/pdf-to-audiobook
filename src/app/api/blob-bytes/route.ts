@@ -1,12 +1,5 @@
 import { NextResponse } from "next/server";
-import { get } from "@vercel/blob";
-
 export const runtime = "nodejs";
-
-function blobUrlToPathname(blobUrl: string) {
-  const u = new URL(blobUrl);
-  return u.pathname.replace(/^\/+/, "");
-}
 
 export async function GET(req: Request) {
   try {
@@ -18,29 +11,26 @@ export async function GET(req: Request) {
     }
 
     const token = process.env.BLOB_READ_WRITE_TOKEN;
-    const readOpts: any = { access: "private" };
-    if (token) readOpts.token = token;
-
-    let result: any;
-    try {
-      result = await get(url, readOpts);
-    } catch {
-      const pathname = blobUrlToPathname(url);
-      result = await get(pathname, readOpts);
+    if (!token) {
+      return NextResponse.json({ error: "Missing BLOB_READ_WRITE_TOKEN" }, { status: 500 });
     }
 
-    if (result?.statusCode && result.statusCode !== 200) {
-      return NextResponse.json({ error: "Blob not found" }, { status: 404 });
+    const blobRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (!blobRes.ok) {
+      const txt = await blobRes.text().catch(() => "");
+      return NextResponse.json(
+        { error: `Private blob fetch failed (${blobRes.status}): ${txt.slice(0, 200)}` },
+        { status: blobRes.status || 500 }
+      );
     }
 
-    const contentType = result?.blob?.contentType || "application/octet-stream";
-    const stream = result?.stream;
+    const contentType = blobRes.headers.get("content-type") || "application/octet-stream";
+    const ab = await blobRes.arrayBuffer();
 
-    if (!stream) {
-      return NextResponse.json({ error: "Blob stream missing" }, { status: 500 });
-    }
-
-    return new Response(stream, {
+    return new Response(ab, {
       status: 200,
       headers: { "Content-Type": contentType },
     });

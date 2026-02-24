@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, get } from "@vercel/blob";
+import { put } from "@vercel/blob";
 import textToSpeech from "@google-cloud/text-to-speech";
 import { extractPagesFromPdfBuffer } from "@/lib/extract-pages";
 
@@ -126,49 +126,22 @@ function compressPages(pages: number[]) {
 
 async function fetchPrivateBlobBuffer(url: string): Promise<Buffer> {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
-  const readOpts: any = { access: "private" };
-  if (token) readOpts.token = token;
-
-  let blobRes: any;
-  try {
-    blobRes = await get(url, readOpts);
-  } catch {
-    const pathname = new URL(url).pathname.replace(/^\/+/, "");
-    blobRes = await get(pathname, readOpts);
+  if (!token) {
+    throw new Error("Missing BLOB_READ_WRITE_TOKEN");
   }
 
-  if (blobRes?.data) {
-    if (Buffer.isBuffer(blobRes.data)) return blobRes.data;
-    if (blobRes.data instanceof Uint8Array) return Buffer.from(blobRes.data);
-    if (blobRes.data instanceof ArrayBuffer) return Buffer.from(blobRes.data);
-    if (typeof blobRes.data === "string") return Buffer.from(blobRes.data, "utf8");
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Private blob fetch failed (${res.status}): ${txt.slice(0, 200)}`);
   }
 
-  if (blobRes?.body?.arrayBuffer) {
-    const ab = await blobRes.body.arrayBuffer();
-    return Buffer.from(ab);
-  }
-
-  if (blobRes?.body?.getReader) {
-    const reader = blobRes.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    return Buffer.from(merged);
-  }
-
-  throw new Error("Blob response missing body/data");
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
 }
 
 async function synthesizeWithRetry(client: any, req: any, tries = 3) {
