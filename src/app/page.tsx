@@ -71,32 +71,20 @@ export default function Home() {
     setChapterErrors({});
 
     try {
-      let res = await fetch("/api/chapters", {
+      const res = await fetch("/api/chapters", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pdfUrl: uploadedPdfUrl }),
       });
 
-      // Fallback for environments serving a GET-only handler revision.
-      if (res.status === 405) {
-        const qs = new URLSearchParams({ pdfUrl: uploadedPdfUrl });
-        res = await fetch(`/api/chapters?${qs.toString()}`, { method: "GET" });
-      }
-
-      const contentType = res.headers.get("content-type") || "";
       const raw = await res.text();
       let data: any = null;
       try {
-        data = raw && contentType.includes("application/json") ? JSON.parse(raw) : null;
+        data = raw ? JSON.parse(raw) : null;
       } catch {}
 
       if (!res.ok) {
-        const fallbackMsg = contentType.includes("text/html")
-          ? `Detect chapters failed (${res.status}) — server returned HTML instead of JSON.`
-          : `Detect chapters failed (${res.status})`;
-        const stepSuffix =
-          data?.step && typeof data.step === "string" ? ` [step: ${data.step}]` : "";
-        setError((data?.error || fallbackMsg) + stepSuffix);
+        setError(data?.error || raw || `Detect chapters failed (${res.status})`);
         setDetecting(false);
         return;
       }

@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { put, get } from "@vercel/blob";
+import { put } from "@vercel/blob";
 import textToSpeech from "@google-cloud/text-to-speech";
-import { extractPagesFromPdfBuffer } from "@/lib/extract-pages";
+import { writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { execFile } from "child_process";
 
 export const runtime = "nodejs";
 
@@ -39,38 +42,58 @@ function stripLikelyHeaderFooterLines(lines: string[]) {
   return lines.filter((ln) => !bad.has(ln.trim()));
 }
 
-// (3) Structure smoother
+/**
+ * (2) List reading normalization: bullet lines become spoken "Item: ..."
+ * (3) Structure smoother: expands common abbreviations + cleans punctuation
+ */
 function audiobookPolish(t: string) {
   return (t || "")
+    // expand common abbreviations for spoken flow
     .replace(/\be\.g\.\b/gi, "for example")
     .replace(/\bi\.e\.\b/gi, "that is")
     .replace(/\bvs\.\b/gi, "versus")
     .replace(/\bw\/\b/gi, "with")
     .replace(/\betc\.\b/gi, "etcetera")
+    // reduce double punctuation
     .replace(/([!?])\1+/g, "$1")
+    // normalize spaces
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
-// (2) List reading normalization + cleanup
 function cleanTextForAudio(raw: string) {
   let t = raw || "";
   t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
   let lines = t.split("\n").map((l) => l.trim());
+
+  // remove empty lines and obvious page labels
   lines = lines.filter((l) => l && !/^\d+$/.test(l) && !/^page\s+\d+$/i.test(l));
+
+  // remove repeated headers/footers
   lines = stripLikelyHeaderFooterLines(lines);
 
   t = lines.join("\n");
+
+  // fix hyphenated line breaks: "exam-\nple" -> "example"
   t = t.replace(/(\w)-\n(\w)/g, "$1$2");
+
+  // keep paragraph breaks but collapse single newlines into spaces
   t = t.replace(/\n{3,}/g, "\n\n").replace(/([^\n])\n([^\n])/g, "$1 $2");
 
-  // normalize bullets then turn into spoken list items
+  // normalize bullets to "-" first
   t = t.replace(/[•●▪︎◦·]/g, "-");
+
+  // (2) list reading normalization: turn bullet items into "Item: ..."
+  // Converts lines that start with "- " into spoken-friendly "Item: "
   t = t.replace(/^\s*-\s+/gm, "Item: ");
 
+  // clean spacing
   t = t.replace(/[ \t]{2,}/g, " ").trim();
+
+  // (3) structure smoother
   t = audiobookPolish(t);
+
   return t;
 }
 
@@ -131,55 +154,34 @@ function compressPages(pages: number[]) {
   return parts.slice(0, -1).join(", ") + `, and ${parts[parts.length - 1]}`;
 }
 
-// ✅ Read private blobs directly (no internal /api/blob-bytes call)
-async function fetchPrivateBlobBuffer(url: string): Promise<Buffer> {
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  const readOpts: any = { access: "private" };
-  if (token) readOpts.token = token;
-
-  let blobRes: any;
-  try {
-    blobRes = await get(url, readOpts);
-  } catch {
-    const pathname = new URL(url).pathname.replace(/^\/+/, "");
-    blobRes = await get(pathname, readOpts);
+async function fetchBytes(baseUrl: string, url: string) {
+  const res = await fetch(`${baseUrl}/api/blob-bytes?url=${encodeURIComponent(url)}`);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`blob-bytes failed (${res.status}): ${txt}`);
   }
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
 
-  // Some SDK responses expose data
-  if (blobRes?.data) {
-    if (Buffer.isBuffer(blobRes.data)) return blobRes.data;
-    if (blobRes.data instanceof Uint8Array) return Buffer.from(blobRes.data);
-    if (blobRes.data instanceof ArrayBuffer) return Buffer.from(blobRes.data);
-    if (typeof blobRes.data === "string") return Buffer.from(blobRes.data, "utf8");
-  }
-
-  // Some expose a body with arrayBuffer()
-  if (blobRes?.body?.arrayBuffer) {
-    const ab = await blobRes.body.arrayBuffer();
-    return Buffer.from(ab);
-  }
-
-  // Some expose a ReadableStream
-  if (blobRes?.body?.getReader) {
-    const reader = blobRes.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    return Buffer.from(merged);
-  }
-
-  throw new Error("Blob response missing body/data");
+function runNodeExtractor(
+  pdfPath: string
+): Promise<{ numPages: number; pages: { pageNumber: number; text: string }[] }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [join(process.cwd(), "scripts", "extract-pages.mjs"), pdfPath],
+      { maxBuffer: 1024 * 1024 * 40 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        try {
+          resolve(JSON.parse(stdout));
+        } catch {
+          reject(new Error(`Failed to parse extractor output: ${stdout.slice(0, 250)}`));
+        }
+      }
+    );
+  });
 }
 
 async function synthesizeWithRetry(client: any, req: any, tries = 3) {
@@ -200,38 +202,45 @@ export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const pdfUrl = body?.pdfUrl;
-    const extractedUrl = body?.extractedUrl; // cached extraction json (private blob)
+    const extractedUrl = body?.extractedUrl;
     const startPage = Number(body?.startPage);
     const endPage = Number(body?.endPage);
     const chapterIndex = Number(body?.chapterIndex);
     const chapterTitle = String(body?.chapterTitle || "Chapter");
+
+    // voice selection
     const voiceKey = body?.voiceKey;
 
     if (!pdfUrl || !Number.isFinite(startPage) || !Number.isFinite(endPage) || !Number.isFinite(chapterIndex)) {
       return NextResponse.json({ error: "Missing/invalid inputs" }, { status: 400 });
     }
 
+    const baseUrl = new URL(req.url).origin;
+
     // Load pages from cache if available
     let pages: { pageNumber: number; text: string }[] | null = null;
 
     if (extractedUrl && typeof extractedUrl === "string") {
-      const cachedBuf = await fetchPrivateBlobBuffer(extractedUrl);
+      const cachedBuf = await fetchBytes(baseUrl, extractedUrl);
       const cached = JSON.parse(cachedBuf.toString("utf8"));
       pages = Array.isArray(cached?.pages) ? cached.pages : null;
     }
 
-    // Fallback: extract from PDF (bundled, no scripts)
+    // Fallback if cache not present
     if (!pages) {
-      const pdfBuf = await fetchPrivateBlobBuffer(pdfUrl);
-      const extracted = await extractPagesFromPdfBuffer(pdfBuf);
+      const pdfBuf = await fetchBytes(baseUrl, pdfUrl);
+      const pdfPath = join(tmpdir(), `chapter-${Date.now()}.pdf`);
+      writeFileSync(pdfPath, pdfBuf);
+      const extracted = await runNodeExtractor(pdfPath);
       pages = extracted.pages;
     }
 
     const inRange = pages.filter((p) => p.pageNumber >= startPage && p.pageNumber <= endPage);
 
+    // Clean and polish text for audiobook feel
     const chapterText = cleanTextForAudio(inRange.map((p) => p.text).join("\n\n"));
 
-    // Visual page heuristic (no vision)
+    // Visual page detection (no vision)
     const visualPages = inRange
       .filter((p) => {
         const s = (p.text || "").trim();
@@ -246,8 +255,9 @@ export async function POST(req: Request) {
       })
       .map((p) => p.pageNumber);
 
-    // (1) Audiobook-style intro pacing
+    // (1) Audiobook-style intro pacing (multi-line + natural pause cues)
     const intro = `Chapter ${chapterIndex}.\n${chapterTitle}.\n`;
+
     let finalText = `${intro}\n${chapterText}`.trim();
 
     if (visualPages.length) {
@@ -257,6 +267,7 @@ export async function POST(req: Request) {
         `For the visuals in this chapter, see pages ${pagesStr}.`;
     }
 
+    // guardrail
     if (finalText.length > 200000) {
       throw new Error("Chapter is too long to render in one pass. Split into smaller chapters.");
     }
@@ -285,6 +296,7 @@ export async function POST(req: Request) {
       const resp = await synthesizeWithRetry(client, {
         input: { text: chunk },
         voice: { languageCode, name: voiceName },
+        // (5) Audiobook-ish delivery tuning
         audioConfig: {
           audioEncoding: "MP3",
           speakingRate: 0.98,
@@ -304,12 +316,7 @@ export async function POST(req: Request) {
 
     const mp3 = Buffer.concat(mp3Parts);
 
-    const safeTitle = chapterTitle
-      .replace(/[^\w.\- ]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 80);
-
+    const safeTitle = chapterTitle.replace(/[^\w.\- ]+/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
     const filename = `chapters/${Date.now()}-ch${String(chapterIndex).padStart(2, "0")}-${safeTitle || "Chapter"}.mp3`;
 
     const blob = await put(filename, mp3, {
