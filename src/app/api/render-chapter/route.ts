@@ -134,9 +134,16 @@ function compressPages(pages: number[]) {
 // ✅ Read private blobs directly (no internal /api/blob-bytes call)
 async function fetchPrivateBlobBuffer(url: string): Promise<Buffer> {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN");
+  const readOpts: any = { access: "private" };
+  if (token) readOpts.token = token;
 
-  const blobRes: any = await get(url, { token, access: "private" } as any);
+  let blobRes: any;
+  try {
+    blobRes = await get(url, readOpts);
+  } catch {
+    const pathname = new URL(url).pathname.replace(/^\/+/, "");
+    blobRes = await get(pathname, readOpts);
+  }
 
   // Some SDK responses expose data
   if (blobRes?.data) {

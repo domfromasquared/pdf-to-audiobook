@@ -21,16 +21,18 @@ function cleanTitle(s: string) {
 // Read private blob bytes directly (avoids calling /api/blob-bytes, so no Deployment Protection issues)
 async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN");
 
   let blobRes: any;
+  const readOpts: any = { access: "private" };
+  if (token) readOpts.token = token;
+
   try {
-    // This shape is already used successfully in /api/render-chapter.
-    blobRes = await get(url, { token, access: "private" } as any);
+    // Works with full blob URL in most environments.
+    blobRes = await get(url, readOpts);
   } catch {
-    // Fallback for environments expecting a pathname key.
+    // Fallback for environments expecting pathname keys.
     const pathname = new URL(url).pathname.replace(/^\/+/, "");
-    blobRes = await get(pathname, { token, access: "private" } as any);
+    blobRes = await get(pathname, readOpts);
   }
 
   // Some SDK responses include `body`, some include `data`
