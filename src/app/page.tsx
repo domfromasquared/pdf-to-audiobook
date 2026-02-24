@@ -79,7 +79,7 @@ export default function Home() {
       let res = await fetch("/api/chapters", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pdfUrl: uploadedPdfUrl }),
+        body: JSON.stringify({ pdfUrl: uploadedPdfUrl, url: uploadedPdfUrl }),
       });
 
       if (res.status === 405) {
@@ -161,13 +161,12 @@ export default function Home() {
         return;
       }
 
-      if (!data?.pdfUrl) {
-        setError(`Upload succeeded but response missing pdfUrl. Raw: ${raw}`);
+      const uploadedPdfUrl = (data?.pdfUrl || data?.url) as string | undefined;
+      if (!uploadedPdfUrl) {
+        setError(`Upload succeeded but response missing pdfUrl/url. Raw: ${raw}`);
         setUploading(false);
         return;
       }
-
-      const uploadedPdfUrl = data.pdfUrl as string;
       setPdfUrl(uploadedPdfUrl);
       setUploading(false);
 
