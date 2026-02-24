@@ -75,65 +75,70 @@ async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
 
 async function detectChapters(pdfUrl: string) {
   let step = "init";
-  // Lazy import keeps route boot resilient: module-load failures become JSON errors.
-  step = "import-extractor";
-  const { extractPagesFromPdfBuffer } = await import("@/lib/extract-pages");
+  try {
+    // Lazy import keeps route boot resilient: module-load failures become JSON errors.
+    step = "import-extractor";
+    const { extractPagesFromPdfBuffer } = await import("@/lib/extract-pages");
 
-  // Fetch PDF bytes directly from private blob (no internal HTTP call)
-  step = "read-pdf-blob";
-  const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
+    // Fetch PDF bytes directly from private blob (no internal HTTP call)
+    step = "read-pdf-blob";
+    const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
 
-  // Extract pages via bundled helper (no /scripts dependency)
-  step = "extract-pages";
-  const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
+    // Extract pages via bundled helper (no /scripts dependency)
+    step = "extract-pages";
+    const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
 
-  // Cache extraction output into private Blob
-  step = "write-extraction-cache";
-  const extractedBlob = await put(
-    `extracted/${Date.now()}-pages.json`,
-    Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
-    { access: "private", contentType: "application/json", addRandomSuffix: false }
-  );
+    // Cache extraction output into private Blob
+    step = "write-extraction-cache";
+    const extractedBlob = await put(
+      `extracted/${Date.now()}-pages.json`,
+      Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
+      { access: "private", contentType: "application/json", addRandomSuffix: false }
+    );
 
-  // Heading candidates
-  step = "detect-headings";
-  const candidates: { page: number; title: string }[] = [];
-  for (const p of pages) {
-    const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
-    if (looksLikeHeading(firstChunk)) {
-      candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
+    // Heading candidates
+    step = "detect-headings";
+    const candidates: { page: number; title: string }[] = [];
+    for (const p of pages) {
+      const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
+      if (looksLikeHeading(firstChunk)) {
+        candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
+      }
     }
+
+    let chapters: Chapter[] =
+      candidates.length >= 2
+        ? candidates.map((c, idx) => {
+            const startPage = c.page;
+            const endPage = (candidates[idx + 1]?.page ?? numPages + 1) - 1;
+            return {
+              index: idx + 1,
+              title: c.title || `Chapter ${idx + 1}`,
+              startPage,
+              endPage: Math.max(startPage, Math.min(endPage, numPages)),
+            };
+          })
+        : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
+
+    // Ensure pages 1..(firstStart-1) are included
+    const firstStart = chapters[0]?.startPage ?? 1;
+    if (firstStart > 1) {
+      const frontMatter: Chapter = {
+        index: 1,
+        title: "Front Matter",
+        startPage: 1,
+        endPage: firstStart - 1,
+      };
+
+      chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
+    }
+
+    step = "done";
+    return NextResponse.json({ numPages, chapters, extractedUrl: extractedBlob.url });
+  } catch (err: any) {
+    err.step = step;
+    throw err;
   }
-
-  let chapters: Chapter[] =
-    candidates.length >= 2
-      ? candidates.map((c, idx) => {
-          const startPage = c.page;
-          const endPage = (candidates[idx + 1]?.page ?? numPages + 1) - 1;
-          return {
-            index: idx + 1,
-            title: c.title || `Chapter ${idx + 1}`,
-            startPage,
-            endPage: Math.max(startPage, Math.min(endPage, numPages)),
-          };
-        })
-      : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
-
-  // Ensure pages 1..(firstStart-1) are included
-  const firstStart = chapters[0]?.startPage ?? 1;
-  if (firstStart > 1) {
-    const frontMatter: Chapter = {
-      index: 1,
-      title: "Front Matter",
-      startPage: 1,
-      endPage: firstStart - 1,
-    };
-
-    chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
-  }
-
-  step = "done";
-  return NextResponse.json({ numPages, chapters, extractedUrl: extractedBlob.url });
 }
 
 export async function POST(req: Request) {
@@ -149,6 +154,7 @@ export async function POST(req: Request) {
     step = "detect-chapters";
     return await detectChapters(pdfUrl);
   } catch (err: any) {
+    if (err?.step) step = err.step;
     const message = err?.message || "Failed to detect chapters";
     console.error("CHAPTERS_ERROR:", { step, message, err });
     return NextResponse.json({ error: message, step }, { status: 500 });
@@ -168,6 +174,7 @@ export async function GET(req: Request) {
     step = "detect-chapters";
     return await detectChapters(pdfUrl);
   } catch (err: any) {
+    if (err?.step) step = err.step;
     const message = err?.message || "Failed to detect chapters";
     console.error("CHAPTERS_ERROR:", { step, message, err });
     return NextResponse.json({ error: message, step }, { status: 500 });
