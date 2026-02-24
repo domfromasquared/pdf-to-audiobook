@@ -57,6 +57,11 @@ export default function Home() {
   }, [uploading, detecting, chapters, numPages]);
 
   async function detectChaptersForUrl(uploadedPdfUrl: string) {
+    if (!uploadedPdfUrl || typeof uploadedPdfUrl !== "string") {
+      setError("Upload succeeded, but no PDF URL was available for chapter detection.");
+      return;
+    }
+
     setDetecting(true);
     setError(null);
 

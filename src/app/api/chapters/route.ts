@@ -132,7 +132,7 @@ export async function POST(req: Request) {
   let step = "parse-request";
   try {
     const body = await req.json().catch(() => ({}));
-    const pdfUrl = body?.pdfUrl;
+    const pdfUrl = body?.pdfUrl || body?.url;
 
     if (!pdfUrl || typeof pdfUrl !== "string") {
       return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
@@ -152,7 +152,7 @@ export async function GET(req: Request) {
   let step = "parse-request";
   try {
     const { searchParams } = new URL(req.url);
-    const pdfUrl = searchParams.get("pdfUrl");
+    const pdfUrl = searchParams.get("pdfUrl") || searchParams.get("url");
 
     if (!pdfUrl) {
       return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
