@@ -64,6 +64,63 @@ async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
   throw new Error("Blob response missing body/data");
 }
 
+async function detectChapters(pdfUrl: string) {
+  // Fetch PDF bytes directly from private blob (no internal HTTP call)
+  const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
+
+  // Extract pages via bundled helper (no /scripts dependency)
+  const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
+
+  // Cache extraction output into private Blob
+  const extractedBlob = await put(
+    `extracted/${Date.now()}-pages.json`,
+    Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
+    { access: "private", contentType: "application/json", addRandomSuffix: false }
+  );
+
+  // Heading candidates
+  const candidates: { page: number; title: string }[] = [];
+  for (const p of pages) {
+    const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
+    if (looksLikeHeading(firstChunk)) {
+      candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
+    }
+  }
+
+  let chapters: Chapter[] =
+    candidates.length >= 2
+      ? candidates.map((c, idx) => {
+          const startPage = c.page;
+          const endPage = (candidates[idx + 1]?.page ?? numPages + 1) - 1;
+          return {
+            index: idx + 1,
+            title: c.title || `Chapter ${idx + 1}`,
+            startPage,
+            endPage: Math.max(startPage, Math.min(endPage, numPages)),
+          };
+        })
+      : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
+
+  // Ensure pages 1..(firstStart-1) are included
+  const firstStart = chapters[0]?.startPage ?? 1;
+  if (firstStart > 1) {
+    const frontMatter: Chapter = {
+      index: 1,
+      title: "Front Matter",
+      startPage: 1,
+      endPage: firstStart - 1,
+    };
+
+    chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
+  }
+
+  return NextResponse.json({
+    numPages,
+    chapters,
+    extractedUrl: extractedBlob.url,
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -73,62 +130,34 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
     }
 
-    // ✅ Fetch PDF bytes directly from private blob (no internal HTTP call)
-    const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
-
-    // ✅ Extract pages via bundled helper (no /scripts dependency)
-    const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);
-
-    // ✅ Cache extraction output into private Blob
-    const extractedBlob = await put(
-      `extracted/${Date.now()}-pages.json`,
-      Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
-      { access: "private", contentType: "application/json", addRandomSuffix: false }
-    );
-
-    // Heading candidates
-    const candidates: { page: number; title: string }[] = [];
-    for (const p of pages) {
-      const firstChunk = p.text.split(" ").slice(0, 14).join(" ").trim();
-      if (looksLikeHeading(firstChunk)) {
-        candidates.push({ page: p.pageNumber, title: cleanTitle(firstChunk) });
-      }
-    }
-
-    let chapters: Chapter[] =
-      candidates.length >= 2
-        ? candidates.map((c, idx) => {
-            const startPage = c.page;
-            const endPage = (candidates[idx + 1]?.page ?? (numPages + 1)) - 1;
-            return {
-              index: idx + 1,
-              title: c.title || `Chapter ${idx + 1}`,
-              startPage,
-              endPage: Math.max(startPage, Math.min(endPage, numPages)),
-            };
-          })
-        : [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
-
-    // ✅ Ensure pages 1..(firstStart-1) are included
-    const firstStart = chapters[0]?.startPage ?? 1;
-    if (firstStart > 1) {
-      const frontMatter: Chapter = {
-        index: 1,
-        title: "Front Matter",
-        startPage: 1,
-        endPage: firstStart - 1,
-      };
-
-      chapters = [frontMatter, ...chapters.map((c) => ({ ...c, index: c.index + 1 }))];
-    }
-
-    return NextResponse.json({
-      numPages,
-      chapters,
-      extractedUrl: extractedBlob.url,
-    });
+    return await detectChapters(pdfUrl);
   } catch (err: any) {
     console.error("CHAPTERS_ERROR:", err);
     return NextResponse.json({ error: err?.message || "Failed to detect chapters" }, { status: 500 });
   }
+}
+
+export async function GET(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const pdfUrl = searchParams.get("pdfUrl");
+
+    if (!pdfUrl) {
+      return NextResponse.json({ error: "Missing pdfUrl" }, { status: 400 });
+    }
+
+    return await detectChapters(pdfUrl);
+  } catch (err: any) {
+    console.error("CHAPTERS_ERROR:", err);
+    return NextResponse.json({ error: err?.message || "Failed to detect chapters" }, { status: 500 });
+  }
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      Allow: "GET, POST, OPTIONS",
+    },
+  });
 }
