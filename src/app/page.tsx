@@ -71,11 +71,17 @@ export default function Home() {
     setChapterErrors({});
 
     try {
-      const res = await fetch("/api/chapters", {
+      let res = await fetch("/api/chapters", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pdfUrl: uploadedPdfUrl }),
       });
+
+      // Fallback for environments serving a GET-only handler revision.
+      if (res.status === 405) {
+        const qs = new URLSearchParams({ pdfUrl: uploadedPdfUrl });
+        res = await fetch(`/api/chapters?${qs.toString()}`, { method: "GET" });
+      }
 
       const raw = await res.text();
       let data: any = null;
