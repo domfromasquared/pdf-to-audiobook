@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import styles from "./page.module.css";
 
 type Chapter = {
   index: number;
@@ -11,14 +12,78 @@ type Chapter = {
 
 type ChapterStatus = "ready" | "generating" | "done" | "error";
 type DocType = "book" | "report" | "paper" | "slides" | "manual" | "unknown";
+type VoiceOption = "Iapetus" | "Enceladus" | "Orus" | "Leda" | "Callirrhoe";
 
-const voiceOptions = ["Iapetus", "Enceladus", "Orus", "Leda", "Callirrhoe"] as const;
-type VoiceOption = (typeof voiceOptions)[number];
+type GeneratingAllState = {
+  active: boolean;
+  currentChapterIndex: number | null;
+  completedCount: number;
+  totalCount: number;
+};
+
+const voiceOptions: VoiceOption[] = ["Iapetus", "Enceladus", "Orus", "Leda", "Callirrhoe"];
+
+function cx(...values: Array<string | false | null | undefined>) {
+  return values.filter(Boolean).join(" ");
+}
+
+function Spinner({ label, small = false }: { label: string; small?: boolean }) {
+  return (
+    <span className={cx(styles.spinnerWrap, small && styles.spinnerWrapSmall)}>
+      <span className={cx(styles.spinner, small && styles.spinnerSmall)} aria-hidden="true" />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <section className={styles.card}>
+      <div className={styles.cardHeader}>
+        <h2 className={styles.cardTitle}>{title}</h2>
+        {hint ? <span className={styles.cardHint}>{hint}</span> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function StatusChip({ status }: { status: ChapterStatus }) {
+  const label =
+    status === "generating" ? "Generating" : status === "done" ? "Done" : status === "error" ? "Error" : "Ready";
+
+  return (
+    <span
+      className={cx(
+        styles.statusChip,
+        status === "ready" && styles.statusReady,
+        status === "generating" && styles.statusGenerating,
+        status === "done" && styles.statusDone,
+        status === "error" && styles.statusError
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function StatusBanner({ message, subtext, busy }: { message: string; subtext?: string; busy?: boolean }) {
+  return (
+    <div className={styles.statusBanner} role="status" aria-live="polite" aria-atomic="true">
+      <div className={styles.statusMain}>
+        {busy ? <Spinner label={message} /> : <span className={styles.statusIdle}>{message}</span>}
+      </div>
+      {subtext ? <div className={styles.statusSub}>{subtext}</div> : null}
+      {busy ? <div className={styles.statusBar} aria-hidden="true" /> : null}
+    </div>
+  );
+}
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [detecting, setDetecting] = useState(false);
+
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
 
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [extractedUrl, setExtractedUrl] = useState<string | null>(null);
@@ -29,34 +94,87 @@ export default function Home() {
 
   const [selectedVoice, setSelectedVoice] = useState<VoiceOption>("Iapetus");
 
-  const [generating, setGenerating] = useState(false);
   const [chapterDownloads, setChapterDownloads] = useState<Record<number, string>>({});
   const [chapterStatus, setChapterStatus] = useState<Record<number, ChapterStatus>>({});
   const [chapterErrors, setChapterErrors] = useState<Record<number, string>>({});
 
-  const [error, setError] = useState<string | null>(null);
+  const [generatingAll, setGeneratingAll] = useState<GeneratingAllState>({
+    active: false,
+    currentChapterIndex: null,
+    completedCount: 0,
+    totalCount: 0,
+  });
+  const [generatingByChapter, setGeneratingByChapter] = useState<Record<number, boolean>>({});
+  const [downloadingByChapter, setDownloadingByChapter] = useState<Record<number, boolean>>({});
 
-  const previewUrl = useMemo(
-    () => `/previews/${selectedVoice.toLowerCase()}.mp3`,
-    [selectedVoice]
-  );
+  const [error, setError] = useState<string | null>(null);
+  const [lastActionMessage, setLastActionMessage] = useState("Idle. Upload a PDF to begin.");
+
+  const previewUrl = useMemo(() => `/previews/${selectedVoice.toLowerCase()}.mp3`, [selectedVoice]);
+
+  const hasChapters = Boolean(chapters?.length);
 
   const readyForGeneration = useMemo(
-    () => Boolean(pdfUrl) && Boolean(chapters?.length) && !uploading && !detecting,
-    [pdfUrl, chapters, uploading, detecting]
+    () => Boolean(pdfUrl) && Boolean(chapters?.length) && !isUploading && !isDetecting,
+    [pdfUrl, chapters, isUploading, isDetecting]
   );
 
-  const canGenerateAll = useMemo(
-    () => readyForGeneration && !generating,
-    [readyForGeneration, generating]
-  );
+  const canGenerateAll = readyForGeneration && !generatingAll.active;
 
-  const statusText = useMemo(() => {
-    if (uploading) return "Uploading PDF…";
-    if (detecting) return "Detecting chapters…";
-    if (chapters?.length) return `Ready • ${chapters.length} sections • ${numPages ?? "?"} pages`;
-    return "Upload a PDF to begin";
-  }, [uploading, detecting, chapters, numPages]);
+  const firstGeneratingChapter = useMemo(() => {
+    const found = Object.entries(generatingByChapter).find(([, active]) => active);
+    return found ? Number(found[0]) : null;
+  }, [generatingByChapter]);
+
+  const activity = useMemo(() => {
+    if (isUploading) {
+      return {
+        message: "Uploading PDF…",
+        subtext: "Hold on while your file is stored securely.",
+        busy: true,
+      };
+    }
+    if (isDetecting) {
+      return {
+        message: "Detecting chapters…",
+        subtext: "This may take a minute for large documents.",
+        busy: true,
+      };
+    }
+    if (generatingAll.active) {
+      return {
+        message: `Generating all chapters (${generatingAll.completedCount}/${generatingAll.totalCount})…`,
+        subtext:
+          generatingAll.currentChapterIndex != null
+            ? `Currently rendering chapter ${generatingAll.currentChapterIndex}.`
+            : "Rendering chapters in sequence.",
+        busy: true,
+      };
+    }
+    if (firstGeneratingChapter != null) {
+      return {
+        message: `Generating chapter ${firstGeneratingChapter}…`,
+        subtext: "This may take a minute for longer chapters.",
+        busy: true,
+      };
+    }
+    if (hasChapters) {
+      return {
+        message: `Ready • ${chapters?.length ?? 0} sections • ${numPages ?? "?"} pages`,
+        subtext: "Choose one chapter or generate them all.",
+        busy: false,
+      };
+    }
+    return {
+      message: "Idle • Upload a PDF to begin",
+      subtext: "After upload, chapter detection runs automatically.",
+      busy: false,
+    };
+  }, [isUploading, isDetecting, generatingAll, firstGeneratingChapter, hasChapters, chapters, numPages]);
+
+  useEffect(() => {
+    setLastActionMessage(activity.message);
+  }, [activity.message]);
 
   async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs = 240000) {
     const controller = new AbortController();
@@ -74,25 +192,29 @@ export default function Home() {
     }
   }
 
+  function resetGenerationState() {
+    setGeneratingAll({ active: false, currentChapterIndex: null, completedCount: 0, totalCount: 0 });
+    setGeneratingByChapter({});
+    setDownloadingByChapter({});
+    setChapterDownloads({});
+    setChapterStatus({});
+    setChapterErrors({});
+  }
+
   async function detectChaptersForUrl(uploadedPdfUrl: string) {
     if (!uploadedPdfUrl || typeof uploadedPdfUrl !== "string") {
       setError("Upload succeeded, but no PDF URL was available for chapter detection.");
       return;
     }
 
-    setDetecting(true);
+    setIsDetecting(true);
     setError(null);
 
     setChapters(null);
     setNumPages(null);
     setDocType("unknown");
     setExtractedUrl(null);
-
-    // reset generation (new doc)
-    setGenerating(false);
-    setChapterDownloads({});
-    setChapterStatus({});
-    setChapterErrors({});
+    resetGenerationState();
 
     try {
       let res = await fetch("/api/chapters", {
@@ -117,16 +239,13 @@ export default function Home() {
         const fallbackMsg = contentType.includes("text/html")
           ? `Detect chapters failed (${res.status}) — server returned HTML instead of JSON.`
           : `Detect chapters failed (${res.status})`;
-        const stepSuffix =
-          data?.step && typeof data.step === "string" ? ` [step: ${data.step}]` : "";
+        const stepSuffix = data?.step && typeof data.step === "string" ? ` [step: ${data.step}]` : "";
         setError((data?.error || fallbackMsg) + stepSuffix);
-        setDetecting(false);
         return;
       }
 
       if (!data?.chapters || !Array.isArray(data.chapters)) {
         setError(`Detect chapters succeeded but response missing chapters. Raw: ${raw}`);
-        setDetecting(false);
         return;
       }
 
@@ -144,20 +263,21 @@ export default function Home() {
       );
 
       const initialStatus: Record<number, ChapterStatus> = {};
-      for (const ch of data.chapters as Chapter[]) initialStatus[ch.index] = "ready";
+      for (const ch of data.chapters as Chapter[]) {
+        initialStatus[ch.index] = "ready";
+      }
       setChapterStatus(initialStatus);
-
-      setDetecting(false);
     } catch (e: any) {
       setError(e?.message || "Detect chapters failed");
-      setDetecting(false);
+    } finally {
+      setIsDetecting(false);
     }
   }
 
   async function uploadPdf() {
-    if (!file) return;
+    if (!file || isUploading || isDetecting) return;
 
-    setUploading(true);
+    setIsUploading(true);
     setError(null);
 
     setPdfUrl(null);
@@ -166,11 +286,7 @@ export default function Home() {
     setNumPages(null);
     setDocType("unknown");
 
-    // reset generation
-    setGenerating(false);
-    setChapterDownloads({});
-    setChapterStatus({});
-    setChapterErrors({});
+    resetGenerationState();
 
     try {
       const formData = new FormData();
@@ -186,33 +302,31 @@ export default function Home() {
 
       if (!res.ok) {
         setError(data?.error || raw || `Upload failed (${res.status})`);
-        setUploading(false);
         return;
       }
 
       const uploadedPdfUrl = (data?.pdfUrl || data?.url) as string | undefined;
       if (!uploadedPdfUrl) {
         setError(`Upload succeeded but response missing pdfUrl/url. Raw: ${raw}`);
-        setUploading(false);
         return;
       }
-      setPdfUrl(uploadedPdfUrl);
-      setUploading(false);
 
-      // Auto-detect chapters
+      setPdfUrl(uploadedPdfUrl);
       await detectChaptersForUrl(uploadedPdfUrl);
     } catch (e: any) {
       setError(e?.message || "Upload failed");
-      setUploading(false);
+    } finally {
+      setIsUploading(false);
     }
   }
 
   async function generateOneChapter(ch: Chapter) {
-    if (!pdfUrl) return;
+    if (!pdfUrl || !readyForGeneration || generatingAll.active || generatingByChapter[ch.index]) return;
 
     setError(null);
     setChapterErrors((prev) => ({ ...prev, [ch.index]: "" }));
     setChapterStatus((prev) => ({ ...prev, [ch.index]: "generating" }));
+    setGeneratingByChapter((prev) => ({ ...prev, [ch.index]: true }));
 
     try {
       const { res, raw, data } = await fetchJsonWithTimeout(
@@ -258,24 +372,41 @@ export default function Home() {
           : e?.message || "Failed generating chapter";
       setChapterStatus((prev) => ({ ...prev, [ch.index]: "error" }));
       setChapterErrors((prev) => ({ ...prev, [ch.index]: msg }));
+    } finally {
+      setGeneratingByChapter((prev) => ({ ...prev, [ch.index]: false }));
     }
   }
 
   async function generateAllChapters() {
-    if (!pdfUrl || !chapters?.length) return;
+    if (!pdfUrl || !chapters?.length || !readyForGeneration || generatingAll.active) return;
 
-    setGenerating(true);
     setError(null);
     setChapterErrors({});
 
+    const totalCount = chapters.length;
+    const initialCompleted = chapters.filter((ch) => Boolean(chapterDownloads[ch.index])).length;
+
     const reset: Record<number, ChapterStatus> = {};
-    for (const ch of chapters) reset[ch.index] = chapterDownloads[ch.index] ? "done" : "ready";
+    for (const ch of chapters) {
+      reset[ch.index] = chapterDownloads[ch.index] ? "done" : "ready";
+    }
     setChapterStatus(reset);
 
+    setGeneratingAll({
+      active: true,
+      currentChapterIndex: null,
+      completedCount: initialCompleted,
+      totalCount,
+    });
+
     try {
+      let completedCount = initialCompleted;
+
       for (const ch of chapters) {
         if (chapterDownloads[ch.index]) continue;
 
+        setGeneratingAll((prev) => ({ ...prev, currentChapterIndex: ch.index }));
+        setGeneratingByChapter((prev) => ({ ...prev, [ch.index]: true }));
         setChapterStatus((prev) => ({ ...prev, [ch.index]: "generating" }));
 
         const { res, raw, data } = await fetchJsonWithTimeout(
@@ -314,6 +445,9 @@ export default function Home() {
 
         setChapterDownloads((prev) => ({ ...prev, [ch.index]: data.downloadUrl }));
         setChapterStatus((prev) => ({ ...prev, [ch.index]: "done" }));
+
+        completedCount += 1;
+        setGeneratingAll((prev) => ({ ...prev, completedCount }));
       }
     } catch (e: any) {
       const msg =
@@ -322,451 +456,198 @@ export default function Home() {
           : e?.message || "Failed generating chapters";
       setError(msg);
     } finally {
-      setGenerating(false);
+      setGeneratingAll((prev) => ({
+        ...prev,
+        active: false,
+        currentChapterIndex: null,
+      }));
+      setGeneratingByChapter({});
     }
   }
 
-  return (
-    <main style={styles.page}>
-      <div style={styles.bgGlowA} />
-      <div style={styles.bgGlowB} />
-      <div style={styles.bgGrid} />
+  function handleDownloadClick(chapterIndex: number) {
+    setDownloadingByChapter((prev) => ({ ...prev, [chapterIndex]: true }));
+    setLastActionMessage(`Download started for chapter ${chapterIndex}.`);
+    setTimeout(() => {
+      setDownloadingByChapter((prev) => ({ ...prev, [chapterIndex]: false }));
+    }, 1800);
+  }
 
-      <div style={styles.shell}>
-        <header style={styles.header}>
-          <div style={styles.brandRow}>
-            <div style={styles.logoMark} aria-hidden />
-            <div>
-              <div style={styles.brand}>PDF → Chapter Audiobook</div>
-              <div style={styles.subBrand}>
-                Upload a PDF, pick a voice, download per-chapter MP3s.
-              </div>
-            </div>
+  return (
+    <main className={styles.page}>
+      <div className={styles.bgGlowA} aria-hidden="true" />
+      <div className={styles.bgGlowB} aria-hidden="true" />
+      <div className={styles.bgGrid} aria-hidden="true" />
+
+      <div className={styles.container}>
+        <div className={styles.visuallyHidden} aria-live="polite" aria-atomic="true">
+          {lastActionMessage}
+        </div>
+
+        <header className={styles.header}>
+          <div className={styles.logoMark} aria-hidden="true" />
+          <div>
+            <h1 className={styles.title}>PDF → Chapter Audiobook</h1>
+            <p className={styles.subtitle}>Upload a PDF, pick a voice, and generate downloadable chapter MP3s.</p>
           </div>
         </header>
 
-        {/* Top row: Upload + Voice */}
-        <section style={styles.topGrid}>
-          <div style={styles.card}>
-            <div style={styles.cardTitleRow}>
-              <h2 style={styles.cardTitle}>1) Upload PDF</h2>
-              <div style={styles.cardHint}>{statusText}</div>
-            </div>
+        <StatusBanner message={activity.message} subtext={activity.subtext} busy={activity.busy} />
 
-            <div style={styles.uploadRow}>
-              <label style={styles.fileLabel}>
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  style={styles.fileInput}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] || null;
-                    setFile(f);
-                    setError(null);
-                  }}
-                />
-                <span style={styles.fileButton}>Choose PDF</span>
-                <span style={styles.fileName}>{file ? file.name : "No file selected"}</span>
-              </label>
+        <div className={cx(styles.layout, hasChapters && styles.layoutWithChapters)}>
+          <div className={styles.leftCol}>
+            <Card title="1) Upload PDF" hint={isDetecting ? "Detecting…" : isUploading ? "Uploading…" : "Ready"}>
+              <div className={styles.stackSm}>
+                <label className={styles.fileLabel}>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    className={styles.fileInput}
+                    onChange={(e) => {
+                      const picked = e.target.files?.[0] || null;
+                      setFile(picked);
+                      setError(null);
+                    }}
+                  />
+                  <span className={styles.fileButton}>Choose PDF</span>
+                  <span className={styles.fileName}>{file ? file.name : "No file selected"}</span>
+                </label>
 
-              <button
-                style={styles.primaryButton}
-                onClick={uploadPdf}
-                disabled={!file || uploading || detecting}
-              >
-                {uploading ? "Uploading…" : detecting ? "Detecting…" : "Upload"}
-              </button>
-            </div>
+                <button
+                  className={cx(styles.btn, styles.btnPrimary)}
+                  onClick={uploadPdf}
+                  disabled={!file || isUploading || isDetecting}
+                  aria-busy={isUploading}
+                >
+                  {isUploading ? <Spinner label="Uploading…" small /> : "Upload"}
+                </button>
 
-            {pdfUrl && (
-              <div style={styles.smallRow}>
-                <a style={styles.link} href={pdfUrl} target="_blank" rel="noreferrer">
-                  Open uploaded PDF
-                </a>
+                {isDetecting ? <Spinner label="Detecting chapters…" small /> : null}
+
+                {pdfUrl ? (
+                  <a className={styles.inlineLink} href={pdfUrl} target="_blank" rel="noreferrer">
+                    Open uploaded PDF
+                  </a>
+                ) : null}
               </div>
-            )}
+            </Card>
+
+            <Card title="2) Voice" hint="Preview instantly">
+              <div className={styles.stackSm}>
+                <select
+                  value={selectedVoice}
+                  onChange={(e) => setSelectedVoice(e.target.value as VoiceOption)}
+                  className={styles.select}
+                >
+                  {voiceOptions.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+                <audio controls preload="none" src={previewUrl} className={styles.audio} />
+              </div>
+            </Card>
           </div>
 
-          <div style={styles.card}>
-            <div style={styles.cardTitleRow}>
-              <h2 style={styles.cardTitle}>2) Voice</h2>
-              <div style={styles.cardHint}>Preview instantly</div>
-            </div>
-
-            <div style={styles.voiceRow}>
-              <select
-                value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value as VoiceOption)}
-                style={styles.select}
-              >
-                {voiceOptions.map((v) => (
-                  <option key={v} value={v} style={{ color: "#111" }}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-
-              <audio controls preload="none" src={previewUrl} style={styles.audio} />
-            </div>
-
-            
-          </div>
-        </section>
-
-        {/* Chapters */}
-        <section style={styles.card}>
-          <div style={styles.cardTitleRow}>
-            <h2 style={styles.cardTitle}>3) Chapters</h2>
-            <div style={styles.cardHint}>
-              {detecting
-                ? "Detecting…"
-                : chapters?.length
-                ? `${chapters.length} sections • ${numPages ?? "?"} pages`
-                : "Waiting for upload"}
-            </div>
-          </div>
-
-          <div style={styles.actionsRow}>
-            <button
-              style={{
-                ...styles.primaryButton,
-                opacity: canGenerateAll ? 1 : 0.55,
-                cursor: canGenerateAll ? "pointer" : "not-allowed",
-              }}
-              onClick={generateAllChapters}
-              disabled={!canGenerateAll}
+          <div className={styles.rightCol}>
+            <Card
+              title="3) Chapters"
+              hint={
+                isDetecting
+                  ? "Detecting…"
+                  : chapters?.length
+                  ? `${chapters.length} sections • ${numPages ?? "?"} pages`
+                  : "Waiting for upload"
+              }
             >
-              {generating ? "Generating…" : "Generate all MP3s"}
-            </button>
+              <div className={styles.stackMd}>
+                <div className={styles.actionsRow}>
+                  <button
+                    className={cx(styles.btn, styles.btnPrimary)}
+                    onClick={generateAllChapters}
+                    disabled={!canGenerateAll}
+                    aria-busy={generatingAll.active}
+                  >
+                    {generatingAll.active ? (
+                      <Spinner
+                        label={`Generating all (${generatingAll.completedCount}/${generatingAll.totalCount})…`}
+                        small
+                      />
+                    ) : (
+                      "Generate all MP3s"
+                    )}
+                  </button>
 
-            <span style={{ ...styles.pill, opacity: readyForGeneration ? 1 : 0.5 }}>
-              voice: {selectedVoice}
-            </span>
+                  <span className={styles.metaPill}>Voice: {selectedVoice}</span>
+                  <span className={styles.metaPill}>Extraction: {extractedUrl ? "Ready" : "Not ready"}</span>
+                </div>
 
-            <span style={{ ...styles.pill, opacity: extractedUrl ? 1 : 0.5 }}>
-              status {extractedUrl ? "ready" : "not ready"}
-            </span>
-          </div>
+                {!chapters ? <div className={styles.emptyState}>Upload a PDF to detect chapters.</div> : null}
 
-          {!chapters && (
-            <div style={styles.emptyState}>
-              Upload a PDF and we’ll automatically detect chapters.
-            </div>
-          )}
+                {chapters ? (
+                  <div className={styles.chapterList}>
+                    {chapters.map((ch) => {
+                      const status = chapterStatus[ch.index] || "ready";
+                      const downloadUrl = chapterDownloads[ch.index];
+                      const chapterError = chapterErrors[ch.index];
+                      const rowGenerating = Boolean(generatingByChapter[ch.index]);
+                      const rowDownloading = Boolean(downloadingByChapter[ch.index]);
 
-          {chapters && (
-            <div style={styles.chapterList}>
-              {chapters.map((ch) => {
-                const status = chapterStatus[ch.index] || "ready";
-                const dl = chapterDownloads[ch.index];
-                const chErr = chapterErrors[ch.index];
+                      return (
+                        <article key={ch.index} className={styles.chapterItem}>
+                          <div className={styles.chapterMain}>
+                            <div className={styles.chapterIndex}>{String(ch.index).padStart(2, "0")}</div>
+                            <div className={styles.chapterMeta}>
+                              <h3 className={styles.chapterTitle}>{ch.title}</h3>
+                              <p className={styles.chapterPages}>
+                                Pages {ch.startPage}–{ch.endPage}
+                              </p>
+                              {chapterError ? <div className={styles.inlineError}>{chapterError}</div> : null}
+                            </div>
+                          </div>
 
-                return (
-                  <div key={ch.index} style={styles.chapterItem}>
-                    <div style={styles.chapterLeft}>
-                      <div style={styles.chapterIndex}>{String(ch.index).padStart(2, "0")}</div>
-                      <div style={styles.chapterMeta}>
-                        <div style={styles.chapterTitleText}>{ch.title}</div>
-                        <div style={styles.chapterPages}>
-                          Pages {ch.startPage}–{ch.endPage}
-                        </div>
-                        {status === "error" && chErr && (
-                          <div style={styles.chapterError}>{chErr}</div>
-                        )}
-                      </div>
-                    </div>
+                          <div className={styles.chapterActions}>
+                            <StatusChip status={status} />
 
-                    <div style={styles.chapterRight}>
-                      {status === "generating" ? (
-                        <span style={styles.badgeMuted}>generating…</span>
-                      ) : dl ? (
-                        <>
-                          <a style={styles.downloadLink} href={dl}>
-                            Download MP3
-                          </a>
-                          <button
-                            style={styles.secondaryButton}
-                            onClick={() => generateOneChapter(ch)}
-                            disabled={generating || detecting}
-                          >
-                            Regenerate
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          style={styles.secondaryButton}
-                          onClick={() => generateOneChapter(ch)}
-                          disabled={!readyForGeneration || generating}
-                        >
-                          Generate
-                        </button>
-                      )}
-                    </div>
+                            {rowGenerating ? <Spinner label="Generating…" small /> : null}
+                            {rowDownloading ? <Spinner label="Downloading…" small /> : null}
+
+                            {downloadUrl ? (
+                              <a
+                                className={cx(styles.btn, styles.btnSecondary, styles.downloadBtn)}
+                                href={downloadUrl}
+                                onClick={() => handleDownloadClick(ch.index)}
+                              >
+                                Download MP3
+                              </a>
+                            ) : null}
+
+                            <button
+                              className={cx(styles.btn, downloadUrl ? styles.btnDanger : styles.btnSecondary)}
+                              onClick={() => generateOneChapter(ch)}
+                              disabled={!readyForGeneration || generatingAll.active || rowGenerating}
+                            >
+                              {downloadUrl ? "Regenerate" : "Generate"}
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                ) : null}
+              </div>
+            </Card>
+          </div>
+        </div>
 
-        {error && (
-          <section style={styles.errorCard} role="alert">
-            <div style={styles.errorTitle}>Error</div>
-            <div style={styles.errorText}>{error}</div>
+        {error ? (
+          <section className={styles.globalError} role="alert">
+            <div className={styles.globalErrorTitle}>Error</div>
+            <div className={styles.globalErrorText}>{error}</div>
           </section>
-        )}
+        ) : null}
       </div>
     </main>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: "100vh",
-    background: "#050511",
-    color: "white",
-    position: "relative",
-    overflow: "hidden",
-  },
-  bgGlowA: {
-    position: "absolute",
-    inset: "-30%",
-    background:
-      "radial-gradient(60% 60% at 25% 25%, rgba(255, 0, 153, 0.25) 0%, rgba(255, 0, 153, 0.0) 55%), radial-gradient(50% 50% at 70% 40%, rgba(0, 229, 255, 0.22) 0%, rgba(0, 229, 255, 0.0) 60%)",
-    filter: "blur(30px)",
-    pointerEvents: "none",
-  },
-  bgGlowB: {
-    position: "absolute",
-    inset: "-30%",
-    background:
-      "radial-gradient(55% 55% at 55% 85%, rgba(124, 58, 237, 0.25) 0%, rgba(124, 58, 237, 0.0) 60%), radial-gradient(40% 40% at 85% 20%, rgba(255, 122, 0, 0.15) 0%, rgba(255, 122, 0, 0.0) 60%)",
-    filter: "blur(40px)",
-    pointerEvents: "none",
-  },
-  bgGrid: {
-    position: "absolute",
-    inset: 0,
-    backgroundImage:
-      "linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)",
-    backgroundSize: "48px 48px",
-    maskImage: "radial-gradient(circle at 40% 15%, black 0%, transparent 55%)",
-    opacity: 0.35,
-    pointerEvents: "none",
-  },
-
-  shell: { position: "relative", maxWidth: 1040, margin: "0 auto", padding: "42px 18px 30px" },
-
-  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 18 },
-  brandRow: { display: "flex", gap: 12, alignItems: "center" },
-  logoMark: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    background:
-      "linear-gradient(135deg, rgba(255,0,153,0.9), rgba(0,229,255,0.85), rgba(124,58,237,0.9))",
-    boxShadow:
-      "0 0 0 1px rgba(255,255,255,0.12), 0 18px 50px rgba(0,229,255,0.12), 0 18px 55px rgba(255,0,153,0.10)",
-  },
-  brand: { fontSize: 28, fontWeight: 800, letterSpacing: 0.2, lineHeight: 1.1 },
-  subBrand: { marginTop: 4, color: "rgba(255,255,255,0.72)", fontSize: 13, lineHeight: 1.35, maxWidth: 560 },
-
-  pillRow: { display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
-  pill: {
-    fontSize: 12,
-    color: "rgba(255,255,255,0.78)",
-    padding: "6px 10px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    backdropFilter: "blur(10px)",
-  },
-
-  topGrid: { display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 14, marginBottom: 14 },
-
-  card: {
-    borderRadius: 18,
-    background: "rgba(8, 10, 24, 0.55)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    boxShadow: "0 0 0 1px rgba(255,255,255,0.02), 0 18px 80px rgba(0,0,0,0.40)",
-    backdropFilter: "blur(16px)",
-    padding: 16,
-  },
-
-  cardTitleRow: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 12 },
-  cardTitle: { margin: 0, fontSize: 16, fontWeight: 800, letterSpacing: 0.2 },
-  cardHint: { fontSize: 12, color: "rgba(255,255,255,0.62)" },
-
-  uploadRow: { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" },
-
-  fileLabel: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "rgba(255,255,255,0.05)",
-    flex: "1 1 420px",
-    minWidth: 240,
-  },
-  fileInput: { display: "none" },
-  fileButton: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "8px 10px",
-    borderRadius: 12,
-    background: "linear-gradient(135deg, rgba(255,0,153,0.9), rgba(124,58,237,0.9))",
-    border: "1px solid rgba(255,255,255,0.12)",
-    color: "white",
-    fontSize: 12,
-    fontWeight: 800,
-    letterSpacing: 0.2,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  },
-  fileName: { fontSize: 13, color: "rgba(255,255,255,0.72)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-
-  primaryButton: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "linear-gradient(135deg, rgba(0,229,255,0.85), rgba(124,58,237,0.90))",
-    color: "white",
-    fontWeight: 800,
-    fontSize: 13,
-    letterSpacing: 0.2,
-    cursor: "pointer",
-  },
-  secondaryButton: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
-    color: "rgba(255,255,255,0.92)",
-    fontWeight: 700,
-    fontSize: 13,
-    cursor: "pointer",
-  },
-
-  smallRow: { marginTop: 10 },
-
-  link: {
-    fontSize: 13,
-    color: "rgba(0,229,255,0.95)",
-    textDecoration: "none",
-    borderBottom: "1px solid rgba(0,229,255,0.35)",
-    width: "fit-content",
-  },
-
-  voiceRow: { display: "grid", gridTemplateColumns: "1fr", gap: 10 },
-  select: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
-    color: "rgba(255,255,255,0.92)",
-    outline: "none",
-    cursor: "pointer",
-  },
-  audio: { width: "100%" },
-  smallNote: { marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.58)" },
-
-  actionsRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 },
-
-  emptyState: {
-    padding: "14px 12px",
-    borderRadius: 14,
-    border: "1px dashed rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.04)",
-    color: "rgba(255,255,255,0.72)",
-  },
-
-  chapterList: { display: "flex", flexDirection: "column", gap: 10 },
-  chapterItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-    padding: "12px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "rgba(255,255,255,0.05)",
-  },
-  chapterLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
-  chapterIndex: {
-    width: 36,
-    height: 36,
-    borderRadius: 14,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontWeight: 900,
-    fontSize: 12,
-    letterSpacing: 0.3,
-    background: "linear-gradient(135deg, rgba(255,0,153,0.85), rgba(0,229,255,0.80))",
-    border: "1px solid rgba(255,255,255,0.12)",
-    flex: "0 0 auto",
-  },
-  chapterMeta: { minWidth: 0 },
-  chapterTitleText: {
-    fontWeight: 800,
-    fontSize: 13,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    maxWidth: 520,
-  },
-  chapterPages: { marginTop: 3, fontSize: 12, color: "rgba(255,255,255,0.62)" },
-  chapterError: { marginTop: 6, fontSize: 12, color: "rgba(255,160,180,0.95)", maxWidth: 520 },
-
-  chapterRight: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
-  downloadLink: {
-    fontSize: 13,
-    color: "rgba(255,255,255,0.92)",
-    textDecoration: "none",
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
-  },
-  badgeMuted: {
-    fontSize: 11,
-    padding: "6px 10px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.08)",
-    border: "1px solid rgba(255,255,255,0.12)",
-    color: "rgba(255,255,255,0.85)",
-    fontWeight: 800,
-  },
-
-  errorCard: {
-    marginTop: 14,
-    borderRadius: 18,
-    border: "1px solid rgba(255, 80, 80, 0.35)",
-    background: "rgba(255, 20, 80, 0.10)",
-    padding: 14,
-  },
-  errorTitle: {
-    fontWeight: 900,
-    fontSize: 12,
-    color: "rgba(255, 130, 150, 0.95)",
-    letterSpacing: 0.3,
-    textTransform: "uppercase",
-  },
-  errorText: {
-    marginTop: 8,
-    fontSize: 13,
-    color: "rgba(255,255,255,0.88)",
-    whiteSpace: "pre-wrap",
-    wordBreak: "break-word",
-  },
-
-  footer: { marginTop: 18 },
-  footerLine: {
-    height: 1,
-    background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent)",
-  },
-  footerText: { marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.55)" },
-};
