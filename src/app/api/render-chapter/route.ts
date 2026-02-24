@@ -66,7 +66,81 @@ function cleanTextForAudio(raw: string) {
   return audiobookPolish(t);
 }
 
-function chunkText(text: string, maxChars = 4500) {
+function utf8Bytes(s: string) {
+  return Buffer.byteLength(s, "utf8");
+}
+
+function splitToByteSafeParts(input: string, maxBytes: number) {
+  const text = (input || "").trim();
+  if (!text) return [];
+  if (utf8Bytes(text) <= maxBytes) return [text];
+
+  const out: string[] = [];
+  let cur = "";
+
+  const pushCur = () => {
+    const v = cur.trim();
+    if (v) out.push(v);
+    cur = "";
+  };
+
+  // Split by sentence first, then by words if a single sentence is too large.
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  for (const sentence of sentences) {
+    if (utf8Bytes(sentence) <= maxBytes) {
+      const candidate = cur ? `${cur} ${sentence}` : sentence;
+      if (utf8Bytes(candidate) <= maxBytes) cur = candidate;
+      else {
+        pushCur();
+        cur = sentence;
+      }
+      continue;
+    }
+
+    const words = sentence.split(/\s+/).filter(Boolean);
+    for (const w of words) {
+      if (utf8Bytes(w) > maxBytes) {
+        // Ultra-defensive fallback for pathological tokens.
+        let token = w;
+        while (utf8Bytes(token) > maxBytes) {
+          let sliceLen = token.length;
+          while (sliceLen > 1 && utf8Bytes(token.slice(0, sliceLen)) > maxBytes) {
+            sliceLen = Math.floor(sliceLen * 0.8);
+          }
+          const part = token.slice(0, Math.max(1, sliceLen));
+          const candidate = cur ? `${cur} ${part}` : part;
+          if (utf8Bytes(candidate) <= maxBytes) cur = candidate;
+          else {
+            pushCur();
+            cur = part;
+          }
+          token = token.slice(part.length);
+        }
+        if (token) {
+          const candidate = cur ? `${cur} ${token}` : token;
+          if (utf8Bytes(candidate) <= maxBytes) cur = candidate;
+          else {
+            pushCur();
+            cur = token;
+          }
+        }
+        continue;
+      }
+
+      const candidate = cur ? `${cur} ${w}` : w;
+      if (utf8Bytes(candidate) <= maxBytes) cur = candidate;
+      else {
+        pushCur();
+        cur = w;
+      }
+    }
+  }
+
+  pushCur();
+  return out;
+}
+
+function chunkText(text: string, maxBytes = 4800) {
   const paragraphs = text
     .split(/\n{2,}/g)
     .map((p) => p.trim())
@@ -76,22 +150,22 @@ function chunkText(text: string, maxChars = 4500) {
   let cur = "";
 
   const flush = () => {
-    if (cur.trim()) chunks.push(cur.trim());
+    const v = cur.trim();
+    if (v) chunks.push(v);
     cur = "";
   };
 
   for (const p of paragraphs) {
-    if (p.length > maxChars) {
-      const sentences = p.split(/(?<=[.!?])\s+/);
-      for (const s of sentences) {
-        if ((cur + " " + s).trim().length > maxChars) flush();
-        cur = (cur + " " + s).trim();
+    const paraParts = splitToByteSafeParts(p, maxBytes);
+    for (const part of paraParts) {
+      const candidate = cur ? `${cur}\n\n${part}` : part;
+      if (utf8Bytes(candidate) <= maxBytes) {
+        cur = candidate;
+      } else {
+        flush();
+        cur = part;
       }
-      continue;
     }
-
-    if ((cur + "\n\n" + p).trim().length > maxChars) flush();
-    cur = (cur ? cur + "\n\n" : "") + p;
   }
 
   flush();
@@ -238,10 +312,13 @@ export async function POST(req: Request) {
       process.env.GOOGLE_TTS_VOICE ||
       "en-US-Neural2-F";
 
-    const chunks = chunkText(finalText, 4500);
+    const chunks = chunkText(finalText, 4800);
     const mp3Parts: Buffer[] = [];
 
     for (const chunk of chunks) {
+      if (utf8Bytes(chunk) > 5000) {
+        throw new Error("Internal chunking error: generated chunk exceeds 5000 bytes");
+      }
       const resp = await synthesizeWithRetry(client, {
         input: { text: chunk },
         voice: { languageCode, name: voiceName },
