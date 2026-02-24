@@ -50,6 +50,7 @@ export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<Extr
 
   const loadingTask = pdfjsLib.getDocument({
     data,
+    disableWorker: true,
     useSystemFonts: true,
     disableFontFace: true,
   });
