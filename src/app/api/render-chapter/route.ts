@@ -66,6 +66,32 @@ function cleanTextForAudio(raw: string) {
   return audiobookPolish(t);
 }
 
+function forceSentenceBoundaries(text: string, maxWordsPerSentence = 32) {
+  const tokens = (text || "").split(/\s+/).filter(Boolean);
+  if (!tokens.length) return "";
+
+  const out: string[] = [];
+  let wordsSinceBoundary = 0;
+
+  for (const tok of tokens) {
+    out.push(tok);
+    const hasBoundary = /[.!?]["')\]]*$/.test(tok);
+
+    if (hasBoundary) {
+      wordsSinceBoundary = 0;
+      continue;
+    }
+
+    wordsSinceBoundary += 1;
+    if (wordsSinceBoundary >= maxWordsPerSentence) {
+      out.push(".");
+      wordsSinceBoundary = 0;
+    }
+  }
+
+  return out.join(" ").replace(/\s+([.!?,;:])/g, "$1").trim();
+}
+
 function utf8Bytes(s: string) {
   return Buffer.byteLength(s, "utf8");
 }
@@ -319,8 +345,9 @@ export async function POST(req: Request) {
       if (utf8Bytes(chunk) > 5000) {
         throw new Error("Internal chunking error: generated chunk exceeds 5000 bytes");
       }
+      const ttsSafeChunk = forceSentenceBoundaries(chunk, 32);
       const resp = await synthesizeWithRetry(client, {
-        input: { text: chunk },
+        input: { text: ttsSafeChunk },
         voice: { languageCode, name: voiceName },
         audioConfig: {
           audioEncoding: "MP3",
