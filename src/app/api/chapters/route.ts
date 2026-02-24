@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
-import { extractPagesFromPdfBuffer } from "@/lib/extract-pages";
 
 export const runtime = "nodejs";
 
@@ -42,6 +41,9 @@ async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
 async function detectChapters(pdfUrl: string) {
   let step = "read-pdf-blob";
   try {
+    step = "import-extractor";
+    const { extractPagesFromPdfBuffer } = await import("@/lib/extract-pages");
+
     const pdfBuf = await fetchPrivateBlobBytes(pdfUrl);
     step = "extract-pages";
     const { numPages, pages } = await extractPagesFromPdfBuffer(pdfBuf);

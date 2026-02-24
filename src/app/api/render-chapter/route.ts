@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import textToSpeech from "@google-cloud/text-to-speech";
-import { extractPagesFromPdfBuffer } from "@/lib/extract-pages";
 
 export const runtime = "nodejs";
 
@@ -186,6 +185,7 @@ export async function POST(req: Request) {
     }
 
     if (!pages) {
+      const { extractPagesFromPdfBuffer } = await import("@/lib/extract-pages");
       const pdfBuf = await fetchPrivateBlobBuffer(pdfUrl);
       const extracted = await extractPagesFromPdfBuffer(pdfBuf);
       pages = extracted.pages;
