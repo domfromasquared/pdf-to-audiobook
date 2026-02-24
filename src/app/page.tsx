@@ -10,6 +10,7 @@ type Chapter = {
 };
 
 type ChapterStatus = "ready" | "generating" | "done" | "error";
+type DocType = "book" | "report" | "paper" | "slides" | "manual" | "unknown";
 
 const voiceOptions = ["Iapetus", "Enceladus", "Orus", "Leda", "Callirrhoe"] as const;
 type VoiceOption = (typeof voiceOptions)[number];
@@ -24,6 +25,7 @@ export default function Home() {
 
   const [chapters, setChapters] = useState<Chapter[] | null>(null);
   const [numPages, setNumPages] = useState<number | null>(null);
+  const [docType, setDocType] = useState<DocType>("unknown");
 
   const [selectedVoice, setSelectedVoice] = useState<VoiceOption>("Iapetus");
 
@@ -83,6 +85,7 @@ export default function Home() {
 
     setChapters(null);
     setNumPages(null);
+    setDocType("unknown");
     setExtractedUrl(null);
 
     // reset generation (new doc)
@@ -130,6 +133,15 @@ export default function Home() {
       setNumPages(typeof data?.numPages === "number" ? data.numPages : null);
       setChapters(data.chapters);
       setExtractedUrl(typeof data?.extractedUrl === "string" ? data.extractedUrl : null);
+      setDocType(
+        data?.docType === "book" ||
+          data?.docType === "report" ||
+          data?.docType === "paper" ||
+          data?.docType === "slides" ||
+          data?.docType === "manual"
+          ? data.docType
+          : "unknown"
+      );
 
       const initialStatus: Record<number, ChapterStatus> = {};
       for (const ch of data.chapters as Chapter[]) initialStatus[ch.index] = "ready";
@@ -152,6 +164,7 @@ export default function Home() {
     setExtractedUrl(null);
     setChapters(null);
     setNumPages(null);
+    setDocType("unknown");
 
     // reset generation
     setGenerating(false);
@@ -215,6 +228,8 @@ export default function Home() {
             chapterIndex: ch.index,
             chapterTitle: ch.title,
             voiceKey: selectedVoice,
+            docType,
+            totalChapters: chapters?.length || 0,
           }),
         },
         240000
@@ -276,6 +291,8 @@ export default function Home() {
               chapterIndex: ch.index,
               chapterTitle: ch.title,
               voiceKey: selectedVoice,
+              docType,
+              totalChapters: chapters.length,
             }),
           },
           240000

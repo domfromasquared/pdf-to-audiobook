@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import textToSpeech from "@google-cloud/text-to-speech";
+import { inferDocType, type DocType } from "@/lib/doc-type";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -97,6 +98,15 @@ function utf8Bytes(s: string) {
   return Buffer.byteLength(s, "utf8");
 }
 
+function escapeSsmlText(text: string) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function splitToByteSafeParts(input: string, maxBytes: number) {
   const text = (input || "").trim();
   if (!text) return [];
@@ -167,36 +177,123 @@ function splitToByteSafeParts(input: string, maxBytes: number) {
   return out;
 }
 
-function chunkText(text: string, maxBytes = 4800) {
+function buildSsmlFromParagraphs(paragraphs: string[]) {
+  const paraSsml = paragraphs
+    .map((p) => {
+      const sentenceBits = forceSentenceBoundaries(p, 28)
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => `<s>${escapeSsmlText(s)}</s>`)
+        .join("");
+      return sentenceBits ? `<p>${sentenceBits}</p>` : "";
+    })
+    .filter(Boolean)
+    .join(`<break time="250ms"/>`);
+
+  return `<speak>${paraSsml}</speak>`;
+}
+
+function chunkTextToSsml(text: string, maxSsmlBytes = 4800) {
   const paragraphs = text
     .split(/\n{2,}/g)
     .map((p) => p.trim())
     .filter(Boolean);
 
+  const atomParagraphs: string[] = [];
+  for (const p of paragraphs) {
+    const normalized = forceSentenceBoundaries(p, 28);
+    if (!normalized) continue;
+    const singleParaSsml = buildSsmlFromParagraphs([normalized]);
+    if (utf8Bytes(singleParaSsml) <= maxSsmlBytes) {
+      atomParagraphs.push(normalized);
+      continue;
+    }
+    const splitParts = splitToByteSafeParts(normalized, 1200);
+    for (const part of splitParts) {
+      if (part.trim()) atomParagraphs.push(part.trim());
+    }
+  }
+
   const chunks: string[] = [];
-  let cur = "";
+  let curParagraphs: string[] = [];
 
   const flush = () => {
-    const v = cur.trim();
-    if (v) chunks.push(v);
-    cur = "";
+    if (!curParagraphs.length) return;
+    const ssml = buildSsmlFromParagraphs(curParagraphs);
+    if (utf8Bytes(ssml) > maxSsmlBytes) {
+      throw new Error("Internal chunking error: generated SSML exceeds max bytes");
+    }
+    chunks.push(ssml);
+    curParagraphs = [];
   };
 
-  for (const p of paragraphs) {
-    const paraParts = splitToByteSafeParts(p, maxBytes);
-    for (const part of paraParts) {
-      const candidate = cur ? `${cur}\n\n${part}` : part;
-      if (utf8Bytes(candidate) <= maxBytes) {
-        cur = candidate;
-      } else {
-        flush();
-        cur = part;
+  for (const p of atomParagraphs) {
+    const candidate = [...curParagraphs, p];
+    const candidateSsml = buildSsmlFromParagraphs(candidate);
+    if (utf8Bytes(candidateSsml) <= maxSsmlBytes) {
+      curParagraphs = candidate;
+    } else {
+      flush();
+      curParagraphs = [p];
+      const single = buildSsmlFromParagraphs(curParagraphs);
+      if (utf8Bytes(single) > maxSsmlBytes) {
+        throw new Error("Internal chunking error: single paragraph exceeds SSML byte budget");
       }
     }
   }
 
   flush();
   return chunks;
+}
+
+function normalizeDocType(value: unknown): DocType {
+  if (
+    value === "book" ||
+    value === "report" ||
+    value === "paper" ||
+    value === "slides" ||
+    value === "manual"
+  ) {
+    return value;
+  }
+  return "unknown";
+}
+
+function buildIntroSlate(input: {
+  docType: DocType;
+  chapterIndex: number;
+  chapterTitle: string;
+  totalChapters: number;
+}) {
+  const title = String(input.chapterTitle || "").trim();
+  const genericTitle =
+    !title ||
+    /^document$/i.test(title) ||
+    new RegExp(`^chapter\\s+${input.chapterIndex}$`, "i").test(title);
+
+  if (input.docType === "slides") return "";
+
+  if (input.docType === "book") {
+    const lines = [`Chapter ${input.chapterIndex}`];
+    if (!genericTitle) lines.push(title.replace(/[.]+$/g, "").trim());
+    return lines.join("\n");
+  }
+
+  const sectioned = input.totalChapters > 1;
+  if (
+    sectioned &&
+    (input.docType === "report" ||
+      input.docType === "manual" ||
+      input.docType === "paper" ||
+      input.docType === "unknown")
+  ) {
+    const lines = [`Section ${input.chapterIndex}`];
+    if (!genericTitle) lines.push(title.replace(/[.]+$/g, "").trim());
+    return lines.join("\n");
+  }
+
+  return "";
 }
 
 function compressPages(pages: number[]) {
@@ -268,18 +365,24 @@ export async function POST(req: Request) {
     const chapterIndex = Number(body?.chapterIndex);
     const chapterTitle = String(body?.chapterTitle || "Chapter");
     const voiceKey = body?.voiceKey;
+    const totalChapters = Number(body?.totalChapters);
+    const requestDocType = normalizeDocType(body?.docType);
 
     if (!pdfUrl || !Number.isFinite(startPage) || !Number.isFinite(endPage) || !Number.isFinite(chapterIndex)) {
       return NextResponse.json({ error: "Missing/invalid inputs" }, { status: 400 });
     }
 
     let pages: { pageNumber: number; text: string }[] | null = null;
+    let docType: DocType = requestDocType;
 
     if (extractedUrl && typeof extractedUrl === "string") {
       try {
         const cachedBuf = await fetchPrivateBlobBuffer(extractedUrl);
         const cached = JSON.parse(cachedBuf.toString("utf8"));
         pages = Array.isArray(cached?.pages) ? cached.pages : null;
+        if (docType === "unknown") {
+          docType = normalizeDocType(cached?.docType);
+        }
       } catch (cacheReadErr) {
         console.warn("RENDER_CACHE_READ_WARNING:", cacheReadErr);
       }
@@ -290,6 +393,10 @@ export async function POST(req: Request) {
       const pdfBuf = await fetchPrivateBlobBuffer(pdfUrl);
       const extracted = await extractPagesFromPdfBuffer(pdfBuf);
       pages = extracted.pages;
+    }
+
+    if (docType === "unknown") {
+      docType = inferDocType(pages).docType;
     }
 
     const inRange = pages.filter((p) => p.pageNumber >= startPage && p.pageNumber <= endPage);
@@ -309,10 +416,15 @@ export async function POST(req: Request) {
       })
       .map((p) => p.pageNumber);
 
-    const intro = `Chapter ${chapterIndex}.\n${chapterTitle}.\n`;
-    let finalText = `${intro}\n${chapterText}`.trim();
+    const intro = buildIntroSlate({
+      docType,
+      chapterIndex,
+      chapterTitle,
+      totalChapters: Number.isFinite(totalChapters) ? totalChapters : 0,
+    });
+    let finalText = `${intro ? `${intro}\n\n` : ""}${chapterText}`.trim();
 
-    if (visualPages.length) {
+    if (process.env.INCLUDE_VISUALS_NOTE === "1" && visualPages.length) {
       const pagesStr = compressPages(visualPages);
       finalText =
         (finalText ? finalText + "\n\n" : "") +
@@ -339,16 +451,15 @@ export async function POST(req: Request) {
       process.env.GOOGLE_TTS_VOICE ||
       "en-US-Neural2-F";
 
-    const chunks = chunkText(finalText, 4800);
+    const chunks = chunkTextToSsml(finalText, 4800);
     const mp3Parts: Buffer[] = [];
 
-    for (const chunk of chunks) {
-      if (utf8Bytes(chunk) > 5000) {
-        throw new Error("Internal chunking error: generated chunk exceeds 5000 bytes");
+    for (const ssml of chunks) {
+      if (utf8Bytes(ssml) > 5000) {
+        throw new Error("Internal chunking error: generated SSML exceeds 5000 bytes");
       }
-      const ttsSafeChunk = forceSentenceBoundaries(chunk, 32);
       const resp = await synthesizeWithRetry(client, {
-        input: { text: ttsSafeChunk },
+        input: { ssml },
         voice: { languageCode, name: voiceName },
         audioConfig: {
           audioEncoding: "MP3",
