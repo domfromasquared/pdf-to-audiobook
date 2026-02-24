@@ -90,11 +90,17 @@ async function detectChapters(pdfUrl: string) {
 
     // Cache extraction output into private Blob
     step = "write-extraction-cache";
+  let extractedUrl: string | null = null;
+  try {
     const extractedBlob = await put(
       `extracted/${Date.now()}-pages.json`,
       Buffer.from(JSON.stringify({ numPages, pages }), "utf8"),
       { access: "private", contentType: "application/json", addRandomSuffix: false }
     );
+    extractedUrl = extractedBlob.url;
+  } catch (cacheErr) {
+    console.warn("CHAPTERS_CACHE_WRITE_WARNING:", cacheErr);
+  }
 
     // Heading candidates
     step = "detect-headings";
@@ -134,7 +140,7 @@ async function detectChapters(pdfUrl: string) {
     }
 
     step = "done";
-    return NextResponse.json({ numPages, chapters, extractedUrl: extractedBlob.url });
+  return NextResponse.json({ numPages, chapters, extractedUrl });
   } catch (err: any) {
     err.step = step;
     throw err;
