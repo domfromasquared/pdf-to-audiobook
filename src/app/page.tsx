@@ -94,7 +94,9 @@ export default function Home() {
         const fallbackMsg = contentType.includes("text/html")
           ? `Detect chapters failed (${res.status}) — server returned HTML instead of JSON.`
           : `Detect chapters failed (${res.status})`;
-        setError(data?.error || fallbackMsg);
+        const stepSuffix =
+          data?.step && typeof data.step === "string" ? ` [step: ${data.step}]` : "";
+        setError((data?.error || fallbackMsg) + stepSuffix);
         setDetecting(false);
         return;
       }
