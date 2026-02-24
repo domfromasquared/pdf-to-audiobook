@@ -18,18 +18,20 @@ function cleanTitle(s: string) {
   return s.replace(/\s+/g, " ").trim().slice(0, 120) || "Chapter";
 }
 
-function blobUrlToPathname(blobUrl: string) {
-  const u = new URL(blobUrl);
-  return u.pathname.replace(/^\/+/, "");
-}
-
 // Read private blob bytes directly (avoids calling /api/blob-bytes, so no Deployment Protection issues)
 async function fetchPrivateBlobBytes(url: string): Promise<Buffer> {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
   if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN");
 
-  const pathname = blobUrlToPathname(url);
-  const blobRes: any = await get(pathname, { token, access: "private" } as any);
+  let blobRes: any;
+  try {
+    // This shape is already used successfully in /api/render-chapter.
+    blobRes = await get(url, { token, access: "private" } as any);
+  } catch {
+    // Fallback for environments expecting a pathname key.
+    const pathname = new URL(url).pathname.replace(/^\/+/, "");
+    blobRes = await get(pathname, { token, access: "private" } as any);
+  }
 
   // Some SDK responses include `body`, some include `data`
   if (blobRes?.data) {
