@@ -34,10 +34,16 @@ async function loadPdfJs() {
 
 export async function extractPagesFromPdfBuffer(pdfBuffer: Buffer): Promise<ExtractedPages> {
   const pdfjsLib = await loadPdfJs();
+  // Force server-side parsing without worker bootstrap in serverless.
+  if ((pdfjsLib as any).GlobalWorkerOptions) {
+    (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "";
+  }
   const data = new Uint8Array(pdfBuffer);
 
   const loadingTask = pdfjsLib.getDocument({
     data,
+    disableWorker: true,
+    worker: null,
     useSystemFonts: true,
     disableFontFace: true,
   });
