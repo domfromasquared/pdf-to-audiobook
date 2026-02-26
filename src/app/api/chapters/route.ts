@@ -72,8 +72,54 @@ function suppressLikelyHeaderFooter(lines: string[], common: Set<string>) {
   });
 }
 
+function shortenTitle(title: string) {
+  let trimmed = title.replace(/\s+/g, " ").trim();
+  trimmed = trimmed.replace(/\s*\(([^)]+)\)\s*$/g, "").trim();
+  const separators = [":", "—", "–", "–", " - "];
+  for (const sep of separators) {
+    const idx = trimmed.indexOf(sep);
+    if (idx > 20) {
+      const candidate = trimmed.slice(0, idx).trim();
+      if (candidate.length > 8) {
+        trimmed = candidate;
+        break;
+      }
+    }
+  }
+  if (trimmed.length > 80) trimmed = trimmed.slice(0, 80).trim();
+  if (!trimmed) trimmed = title.trim();
+  return trimmed || "Chapter";
+}
+
 function cleanTitle(s: string) {
-  return s.replace(/\s+/g, " ").trim().slice(0, 120) || "Chapter";
+  return shortenTitle(s);
+}
+
+function detectFrontMatterRange(pages: PageText[], firstChapterStart: number) {
+  if (!pages.length) return null;
+  const candidateKeywords = [
+    /preface/i,
+    /foreword/i,
+    /acknowledg/i,
+    /\btable of contents\b/i,
+    /\bcontents\b/i,
+    /\bintroduction\b/i,
+    /\babout this book\b/i,
+  ];
+
+  let endPage = 0;
+  for (const page of pages) {
+    if (page.pageNumber >= firstChapterStart) break;
+    const text = page.text.toLowerCase();
+    if (candidateKeywords.some((re) => re.test(text))) {
+      endPage = Math.max(endPage, page.pageNumber);
+    }
+  }
+
+  if (endPage >= 1 && endPage < firstChapterStart) {
+    return { startPage: 1, endPage };
+  }
+  return null;
 }
 
 function looksLikeHeadingLegacy(s: string) {
@@ -306,11 +352,20 @@ async function detectChapters(pdfUrl: string) {
       chapters = [{ index: 1, title: "Document", startPage: 1, endPage: numPages }];
     }
 
-    // Insert front matter if the first real section starts after page 1.
     const firstStart = chapters[0]?.startPage ?? 1;
+    const frontMatterRange = detectFrontMatterRange(pages, firstStart);
     if (firstStart > 1) {
+      const frontEnd =
+        frontMatterRange && frontMatterRange.endPage >= 1
+          ? Math.min(frontMatterRange.endPage, firstStart - 1)
+          : firstStart - 1;
       chapters = [
-        { index: 1, title: "Front Matter", startPage: 1, endPage: firstStart - 1 },
+        { index: 1, title: "Front Matter", startPage: 1, endPage: frontEnd },
+        ...chapters.map((c) => ({ ...c, index: c.index + 1 })),
+      ];
+    } else if (frontMatterRange && frontMatterRange.endPage >= 1 && frontMatterRange.endPage < firstStart) {
+      chapters = [
+        { index: 1, title: "Front Matter", startPage: 1, endPage: frontMatterRange.endPage },
         ...chapters.map((c) => ({ ...c, index: c.index + 1 })),
       ];
     }
