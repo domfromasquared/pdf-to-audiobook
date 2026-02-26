@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import { inferDocType } from "@/lib/doc-type";
+import { LayoutLine } from "@/lib/extract-pages";
 
 export const runtime = "nodejs";
 
 type Chapter = { index: number; title: string; startPage: number; endPage: number };
 
-type PageText = { pageNumber: number; text: string };
+type PageText = { pageNumber: number; text: string; lines: LayoutLine[]; maxFontSize: number };
 type HeadingCandidate = { page: number; title: string; score: number };
 
 function textToLines(text: string) {
@@ -30,6 +31,11 @@ function textToLines(text: string) {
   return out;
 }
 
+function layoutLinesForPage(page: PageText) {
+  if (page.lines && page.lines.length) return page.lines;
+  return textToLines(page.text).map((text) => ({ text, fontSize: 0, indent: 0 }));
+}
+
 function normalizeLine(s: string) {
   return s
     .toLowerCase()
@@ -41,7 +47,7 @@ function normalizeLine(s: string) {
 function buildCommonLineSet(pages: PageText[]) {
   const counts = new Map<string, number>();
   for (const p of pages) {
-    for (const line of textToLines(p.text)) {
+    for (const line of layoutLinesForPage(p).map((l) => l.text)) {
       const n = normalizeLine(line);
       if (!n || n.length < 4) continue;
       counts.set(n, (counts.get(n) || 0) + 1);
@@ -79,7 +85,12 @@ function looksLikeHeadingLegacy(s: string) {
   return false;
 }
 
-function scoreHeadingCandidate(candidate: string, common: Set<string>) {
+function scoreHeadingCandidate(
+  candidate: string,
+  common: Set<string>,
+  meta: LayoutLine | null,
+  pageMaxFont: number
+) {
   const line = candidate.trim();
   if (!line) return -999;
 
@@ -99,6 +110,13 @@ function scoreHeadingCandidate(candidate: string, common: Set<string>) {
   if (/^\W*\d+\W*$/.test(line)) score -= 90;
   if (common.has(normalizeLine(line))) score -= 45;
   if (/^(copyright|all rights reserved)\b/i.test(line)) score -= 40;
+
+  if (meta?.fontSize && pageMaxFont) {
+    const ratio = meta.fontSize / pageMaxFont;
+    if (ratio >= 0.92) score += 24;
+    else if (ratio >= 0.86) score += 12;
+  }
+  if (meta && meta.indent > 30) score -= 8;
 
   return score;
 }
@@ -220,19 +238,33 @@ async function detectChapters(pdfUrl: string) {
     step = "detect-headings";
     const headingCandidates: HeadingCandidate[] = [];
     for (const p of pages) {
-      const lines = suppressLikelyHeaderFooter(textToLines(p.text), commonLines).slice(0, 12);
-      const candidates: string[] = [];
+      const lines = suppressLikelyHeaderFooter(
+        layoutLinesForPage(p).map((l) => l.text),
+        commonLines
+      ).slice(0, 12);
+      const layout = layoutLinesForPage(p);
+      const candidates: Array<{ text: string; meta: LayoutLine | null }> = [];
+
       for (let i = 0; i < lines.length; i++) {
         const one = lines[i];
-        if (one) candidates.push(one);
-        const two = lines[i] && lines[i + 1] ? `${lines[i]} ${lines[i + 1]}` : "";
-        if (two) candidates.push(two);
+        if (one) {
+          candidates.push({ text: one, meta: layout[i] ?? null });
+        }
+        const two =
+          layout[i] && layout[i + 1]
+            ? `${layout[i].text} ${layout[i + 1].text}`
+            : lines[i] && lines[i + 1]
+            ? `${lines[i]} ${lines[i + 1]}`
+            : "";
+        if (two) {
+          candidates.push({ text: two, meta: layout[i] ?? null });
+        }
       }
 
       let best: { title: string; score: number } | null = null;
       for (const c of candidates) {
-        const s = scoreHeadingCandidate(c, commonLines);
-        if (!best || s > best.score) best = { title: c, score: s };
+        const s = scoreHeadingCandidate(c.text, commonLines, c.meta, p.maxFontSize);
+        if (!best || s > best.score) best = { title: c.text, score: s };
       }
       if (best && best.score >= 60) {
         headingCandidates.push({ page: p.pageNumber, title: cleanTitle(best.title), score: best.score });
